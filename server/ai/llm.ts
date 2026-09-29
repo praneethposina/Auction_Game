@@ -40,6 +40,12 @@ export function buildPrompt(game: Game, player: EnginePlayer, companyId: string,
   ].join('\n');
 
   const expectedBuys = Math.max(1, Math.round(((game.upcomingCount() + 1) / game.players.length) * 10) / 10);
+  const analystNotes = [
+    a.heatNote,
+    a.lossChance > 0.15 ? `${Math.round(a.lossChance * 100)}% chance it loses money in an average round` : null,
+    a.denialNote ? `it ${a.denialNote}` : null,
+    a.foresightNote,
+  ].filter(Boolean);
   const holdings = game.holdingsView(player);
   const portfolio =
     holdings.length === 0
@@ -110,7 +116,9 @@ ON THE BLOCK: ${c.def.name} (${sector.name}, ${TIER_LABEL[c.def.tier]} tier, HQ 
 - ${TIER_LABEL[c.def.tier]}-tier turnover is usually ${money(range.low)}–${money(range.high)} per round (avg ${money(range.mean)}).
 - Your estimate using your intel: ~${money(a.estTurnover)} (likely ${money(a.estLow)}–${money(a.estHigh)}).${s.runningCosts ? `\n- Running cost: ${money(c.runningCost)} per round.` : ''}
 - ${synergyLine} ${upliftLine}
-- Naive average-case worth to you (payouts + end value, ignores strategy and competition): ~${money(a.value)}.
+- Naive average-case worth to you (payouts + end value, ignores strategy and competition): ~${money(a.value)}.${
+    analystNotes.length ? `\n- Analyst notes: ${analystNotes.join('; ')}.` : ''
+  }
 
 YOUR PORTFOLIO
 ${portfolio}

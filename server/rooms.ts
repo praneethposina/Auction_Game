@@ -29,6 +29,16 @@ const BOT_NAMES = [
   'Bull Byte',
   'Bearly Legal',
   'Dee Fi',
+  'Quinn Quant',
+  'Hedge Hog',
+  'Ivy Index',
+  'Moe Mentum',
+  'Rich Reserve',
+  'Val U. Hunter',
+  'Sal Sniper',
+  'Blocky Balboa',
+  'Bluey Chip',
+  'Midas Cap',
 ];
 
 export interface RoomPlayer extends LobbyPlayer {
@@ -72,6 +82,9 @@ export function sanitizeSettings(current: GameSettings, patch: Partial<GameSetti
     next.introSeconds = clamp(patch.introSeconds, LIMITS.introSeconds, current.introSeconds);
   if (patch.summarySeconds !== undefined)
     next.summarySeconds = clamp(patch.summarySeconds, LIMITS.summarySeconds, current.summarySeconds);
+  if (patch.soldSeconds !== undefined) next.soldSeconds = clamp(patch.soldSeconds, LIMITS.soldSeconds, current.soldSeconds);
+  if (patch.bidResetSeconds !== undefined)
+    next.bidResetSeconds = clamp(patch.bidResetSeconds, LIMITS.bidResetSeconds, current.bidResetSeconds);
   if (patch.auctionMode === 'open' || patch.auctionMode === 'sealed') next.auctionMode = patch.auctionMode;
   if (patch.winCondition && ['netWorth', 'roi', 'purse', 'portfolio'].includes(patch.winCondition))
     next.winCondition = patch.winCondition;
@@ -215,17 +228,27 @@ export class Room {
   /** A human leaves the lobby for good (or is dropped after disconnecting). */
   leave(playerId: string) {
     if (this.status !== 'lobby') {
+      // Mid-game the seat stays (the game keeps their companies), but host duties move on.
       this.setConnected(playerId, false);
+      if (this.hostId === playerId) this.passHost(playerId);
       return;
     }
     const idx = this.players.findIndex((p) => p.id === playerId);
     if (idx < 0) return;
     this.players.splice(idx, 1);
-    if (this.hostId === playerId) {
-      const next = this.players.find((p) => p.kind === 'human');
-      this.hostId = next?.id ?? '';
-      for (const p of this.players) p.isHost = p.id === this.hostId;
-    }
+    if (this.hostId === playerId) this.passHost(playerId);
+    this.touch();
+  }
+
+  /** Hand the host role to another human, preferring someone who is online. */
+  private passHost(fromId: string) {
+    const humans = this.players.filter((p) => p.kind === 'human' && p.id !== fromId);
+    const next = humans.find((p) => p.connected) ?? humans[0];
+    if (!next) return;
+    this.hostId = next.id;
+    for (const p of this.players) p.isHost = p.id === this.hostId;
+    if (this.game) for (const p of this.game.players) p.isHost = p.id === this.hostId;
+    this.game?.touchView();
     this.touch();
   }
 

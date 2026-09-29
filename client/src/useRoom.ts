@@ -18,6 +18,9 @@ export function useRoom(): RoomState {
   const [resuming, setResuming] = useState(() => loadSession() !== null);
   const [clockOffset, setClockOffset] = useState(0);
   const offsets = useRef<number[]>([]);
+  const viewRef = useRef<RoomView | null>(null);
+  /** Seats we left. A state update already in flight when we left must not pull us back in. */
+  const leftSeats = useRef(new Set<string>());
 
   useEffect(() => {
     const resume = async () => {
@@ -29,6 +32,7 @@ export function useRoom(): RoomState {
       const r = await request<SessionInfo>('room:resume', s);
       if (!r.ok) {
         saveSession(null);
+        viewRef.current = null;
         setView(null);
       }
       setResuming(false);
@@ -39,6 +43,8 @@ export function useRoom(): RoomState {
     };
     const onDisconnect = () => setConnected(false);
     const onState = (v: RoomView) => {
+      if (leftSeats.current.has(`${v.code}:${v.meId}`)) return;
+      viewRef.current = v;
       if (v.game) {
         // Keep a short rolling window and use the max: the smallest network delay wins.
         offsets.current = [...offsets.current.slice(-9), v.game.serverNow - Date.now()];
@@ -65,6 +71,9 @@ export function useRoom(): RoomState {
   }, []);
 
   const leave = useCallback(() => {
+    const current = viewRef.current;
+    if (current) leftSeats.current.add(`${current.code}:${current.meId}`);
+    viewRef.current = null;
     socket.emit('room:leave');
     saveSession(null);
     setView(null);

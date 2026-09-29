@@ -107,7 +107,7 @@ export class AiDirector {
       at: now,
     });
     if (this.game.settings.auctionMode === 'sealed') {
-      this.game.submitSealed(playerId, d.maxBid >= this.game.minOpeningBid() ? d.maxBid : null, now);
+      this.game.submitSealed(playerId, d.maxBid >= this.game.minOpeningBid() ? d.maxBid : null, now, true);
     } else {
       this.nextActAt.set(playerId, now + 200 + this.rng.next() * 1000);
     }
@@ -124,7 +124,7 @@ export class AiDirector {
 
   tick() {
     const a = this.game.auction;
-    if (!a || this.game.phase !== 'auction' || this.game.settings.auctionMode !== 'open') return;
+    if (!a || this.game.paused || this.game.phase !== 'auction' || this.game.settings.auctionMode !== 'open') return;
     const now = this.now();
     for (const [pid, at] of [...this.nextActAt]) {
       if (at > now) continue;

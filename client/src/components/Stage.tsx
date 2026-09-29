@@ -407,7 +407,13 @@ function AuctionView({ g, now, onError }: StageProps) {
         </div>
       )}
 
-      {a.mode === 'open' ? <OpenBidControls g={g} onError={onError} /> : <SealedBidControls g={g} onError={onError} />}
+      {g.paused ? (
+        <div className="callout">Bidding is paused. It picks up where it left off when the host resumes.</div>
+      ) : a.mode === 'open' ? (
+        <OpenBidControls g={g} onError={onError} />
+      ) : (
+        <SealedBidControls g={g} onError={onError} />
+      )}
 
       <CompanyFacts g={g} c={c} />
 

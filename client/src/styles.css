@@ -1392,3 +1392,23 @@ label.field {
   justify-content: flex-end;
   margin-bottom: -8px;
 }
+
+.paused-banner {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  color: var(--gold-2);
+  font-weight: 600;
+  text-align: center;
+}
+
+.btn .hide-sm {
+  display: inline;
+}
+
+@media (max-width: 980px) {
+  .btn .hide-sm {
+    display: none;
+  }
+}

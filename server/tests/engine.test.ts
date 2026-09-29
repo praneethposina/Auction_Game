@@ -463,3 +463,65 @@ describe('long timers', () => {
     expect(sanitizeSettings(DEFAULT_SETTINGS, { summarySeconds: 1 }).summarySeconds).toBe(2);
   });
 });
+
+describe('sold reveal and bid reset timers', () => {
+  it('shows the sale reveal for the chosen time', () => {
+    const game = newGame({ soldSeconds: 20 });
+    const now = advance(game, 0);
+    for (const p of PLAYERS) game.declareOut(p.id, now);
+    expect(game.phase).toBe('sold');
+    expect(game.phaseEndsAt! - now).toBe(20000);
+    game.tick(now + 19999);
+    expect(game.phase).toBe('sold');
+    game.tick(now + 20001);
+    expect(game.phase).toBe('auction');
+  });
+
+  it('tops the countdown up to the chosen time after each bid', () => {
+    const game = newGame({ bidSeconds: 10, bidResetSeconds: 30 });
+    const start = advance(game, 0);
+    game.placeBid('a', 50, start + 9000);
+    expect(game.auction!.deadline).toBe(start + 9000 + 30000);
+    // An early bid never shortens the clock.
+    const g2 = newGame({ bidSeconds: 60, bidResetSeconds: 5 });
+    const s2 = advance(g2, 0);
+    g2.placeBid('a', 50, s2 + 1000);
+    expect(g2.auction!.deadline).toBe(s2 + 60000);
+  });
+});
+
+describe('host controls', () => {
+  it('pause freezes the clock and blocks bids until resume', () => {
+    const game = newGame({ bidSeconds: 10 });
+    const start = advance(game, 0);
+    const deadline = game.auction!.deadline;
+    expect(game.pause(start + 2000)).toEqual({ ok: true });
+    expect(game.placeBid('a', 50, start + 2500)).toMatchObject({ ok: false, error: 'The game is paused.' });
+    expect(game.declareOut('b', start + 2500)).toMatchObject({ ok: false });
+    expect(game.skip(start + 2500)).toMatchObject({ ok: false });
+    game.tick(start + 60000);
+    expect(game.phase).toBe('auction');
+    expect(game.viewFor('a', start + 60000)).toMatchObject({ paused: true, pausedAt: start + 2000 });
+    game.resume(start + 62000);
+    expect(game.auction!.deadline).toBe(deadline + 60000);
+    expect(game.placeBid('a', 50, start + 62001)).toEqual({ ok: true });
+  });
+
+  it('ending early goes straight to final results', () => {
+    const game = newGame({ companyCount: 9 });
+    let now = advance(game, 0);
+    game.placeBid('a', 120, now);
+    for (const p of ['b', 'c']) game.declareOut(p, now);
+    now = advance(game, now); // auction closes → sold reveal
+    now = advance(game, now); // → next auction
+    expect(game.phase).toBe('auction');
+    expect(game.endEarly()).toEqual({ ok: true });
+    expect(game.phase).toBe('finished');
+    expect(game.auction).toBeNull();
+    const r = game.results!;
+    expect(r.standings).toHaveLength(3);
+    expect(r.unsold).toHaveLength(8);
+    expect(game.companies.filter((c) => c.status === 'upcoming')).toHaveLength(0);
+    expect(game.endEarly()).toMatchObject({ ok: false });
+  });
+});

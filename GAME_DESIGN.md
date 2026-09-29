@@ -22,6 +22,8 @@ The host picks:
 | Bid timer | 10 s | 5–600 s |
 | Intro before each round | 6 s | How long the round intro with the market news stays up before bidding (2–600 s) |
 | Round summary | 8 s | How long the end-of-round payday screen stays up (2–600 s) |
+| Sold reveal | 4 s | How long the "Sold to…" screen stays up after each lot (1–600 s) |
+| Time added after each bid | 6 s | Open bidding: a bid tops the countdown back up to at least this (2–600 s) |
 | AI reasoning | Live | Shown after each sale, or only at the end |
 
 **Rounds.** One company per player per round. 5 players and 20 companies means 4 rounds.
@@ -109,12 +111,25 @@ for catch-up, and the tip is private.
 ## Auctions
 
 - **Open.** Live ascending bids. Minimum opening bid is 1% of the budget and the minimum raise is
-  0.5%. The countdown resets to at least 60% of the timer after each bid. Players can press
+  0.5%. After each bid the countdown is topped back up to at least the "time added after each
+  bid" setting. Players can press
   *I'm out*; once everyone but the leader is out, the lot closes in about a second. If nobody bids,
   the company is withdrawn.
 - **Sealed.** Everyone submits one secret bid or passes. The lot resolves as soon as everyone has
   submitted. The highest bid wins and pays its own bid; ties go to the earliest submission. Only
   the winner and price are announced.
+
+## Host controls
+
+During a game the host can:
+- **Skip** the intro, sale reveal or round summary.
+- **Pause / Resume.** Every countdown freezes and bids are refused until the host resumes; the
+  clock then carries on from where it stopped.
+- **End game.** Stops immediately and shows final standings from current cash and companies. The
+  round in progress does not pay out.
+
+If the host leaves mid-game, the host role passes to another human player, preferring one who is
+online.
 
 ## Information rules
 
@@ -137,9 +152,29 @@ Ties are broken by net worth.
 
 ## AI players
 
-- **Built-in bots** need no API key. They estimate turnover from tier plus their private intel,
-  value the company over the payouts left plus its end value, add synergy effects, and apply a
-  budget pace and a personality: Strategist, Tycoon, Value Investor, Empire Builder, or Gambler.
+- **Built-in bots** need no API key. They only use what a human in their seat would know: public
+  game state, their own companies' turnovers, and their own intel. Tests check that changing a
+  rival's hidden cash or turnovers never changes a bot's bid. Their "analyst":
+  - **Infers hidden sector heat** with Bayes' rule. Every company a bot owns reveals its true
+    turnover, which is evidence about its sector's heat (a heat tip settles it exactly). The next
+    company in that sector is valued with the updated odds.
+  - **Values the whole turnover distribution**, narrowed by intel, instead of one average. The end
+    value is floored at zero, so this also prices in the chance of a money-loser.
+  - **Looks ahead:** "next round's headline" tips, synergies a company could unlock with partners
+    still to come, and combos it would complete for a rival (a spoiler value).
+  - **Sets the price by win condition:** net worth uses payouts + end value; cash uses payouts
+    only; return on spend demands a margin; portfolio value splits the whole budget by value share.
+  - **Paces its budget** using expected future income and the number of rivals who can still
+    afford to bid (estimated from public prices, never their real cash). Spending early costs
+    future bargains, a cost that shrinks to zero by the final lot.
+  - **Sealed bids:** shades to about (n−1)/n of value with n estimated bidders, the equilibrium
+    for first-price auctions.
+
+  14 personalities tune this analyst: Strategist, Quant, Tycoon, Value Investor, Empire Builder,
+  Sector Specialist, Blue-Chip Collector, Mid-Cap Hunter, Late Sniper, Cash Hoarder, Momentum
+  Trader, Contrarian, Spoiler and Gambler. `npm run simulate` plays mixed bot games. Every
+  personality wins some games, and which ones do best depends on the auction style and win
+  condition.
 - **LLM players** run on the host's own saved API key (or a key shared by the server owner) and
   get the same private view a human has (rules, cash, portfolio, intel, news,
   opponents' holdings, relevant combos) and answer with `{"max_bid", "reason"}`.

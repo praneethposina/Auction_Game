@@ -428,6 +428,19 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
         return room.game?.skip(Date.now()) ?? { ok: false, error: 'No game.' };
       }),
     );
+    socket.on('game:pause', (p, ack) =>
+      act(ack, (room, pid) => {
+        if (pid !== room.hostId) return { ok: false, error: 'Only the host can pause.' };
+        if (!room.game) return { ok: false, error: 'No game.' };
+        return p?.paused ? room.game.pause(Date.now()) : room.game.resume(Date.now());
+      }),
+    );
+    socket.on('game:end', (ack) =>
+      act(ack, (room, pid) => {
+        if (pid !== room.hostId) return { ok: false, error: 'Only the host can end the game.' };
+        return room.game?.endEarly() ?? { ok: false, error: 'No game.' };
+      }),
+    );
 
     socket.on('ai:catalog', async (ack) => {
       try {

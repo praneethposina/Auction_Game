@@ -33,7 +33,6 @@ import { createRng, type Rng } from './rng.ts';
 import { drawEvents, rollSectorHeat, rollTurnover, selectPool } from './setup.ts';
 
 export const TIMING = {
-  soldMs: 3200,
   /** Once everyone but the leader is out, close this quickly. */
   earlyCloseMs: 1200,
   /** How long an auction may be held open past its deadline for AI players still deciding. */
@@ -121,6 +120,8 @@ export class Game {
 
   phase: Phase = 'intro';
   phaseEndsAt: number | null;
+  paused = false;
+  pausedAt: number | null = null;
   round = 1;
   cursor = 0;
   auction: AuctionState | null = null;
@@ -239,8 +240,14 @@ export class Game {
     return this.settings.summarySeconds * 1000;
   }
 
+  /** Open bidding: minimum time left on the clock after any bid. */
   private resetMs(): number {
-    return Math.max(4000, Math.round(this.bidMs() * 0.6));
+    return this.settings.bidResetSeconds * 1000;
+  }
+
+  /** How long the sale reveal shows. */
+  soldMs(): number {
+    return this.settings.soldSeconds * 1000;
   }
 
   roundEndIndex(round = this.round): number {
@@ -267,6 +274,7 @@ export class Game {
   // ── Clock ──────────────────────────────────────────────────
 
   tick(now: number) {
+    if (this.paused) return;
     switch (this.phase) {
       case 'intro':
         if (this.phaseEndsAt !== null && now >= this.phaseEndsAt) this.startAuction(now);
@@ -287,10 +295,56 @@ export class Game {
 
   /** Host shortcut to skip an intro, sale reveal or round summary. */
   skip(now: number): ActionResult {
+    if (this.paused) return fail('Resume the game first.');
     if (this.phase === 'auction' || this.phase === 'finished') return fail('Nothing to skip right now.');
     this.phaseEndsAt = now;
     this.tick(now);
     return OK;
+  }
+
+  /** Freeze every countdown. Bids are refused until the host resumes. */
+  pause(now: number): ActionResult {
+    if (this.phase === 'finished') return fail('The game is over.');
+    if (this.paused) return OK;
+    this.paused = true;
+    this.pausedAt = now;
+    this.log('⏸ The host paused the game');
+    this.touch();
+    return OK;
+  }
+
+  resume(now: number): ActionResult {
+    if (!this.paused || this.pausedAt === null) return OK;
+    const shift = Math.max(0, now - this.pausedAt);
+    if (this.phaseEndsAt !== null) this.phaseEndsAt += shift;
+    if (this.auction) {
+      this.auction.startedAt += shift;
+      this.auction.deadline += shift;
+      this.auction.hardDeadline += shift;
+    }
+    this.paused = false;
+    this.pausedAt = null;
+    this.log('▶ The host resumed the game');
+    this.touch();
+    this.maybeEarlyClose(now);
+    return OK;
+  }
+
+  /** Host ends the game now: no more auctions or payouts, straight to final standings. */
+  endEarly(): ActionResult {
+    if (this.phase === 'finished') return fail('The game is already over.');
+    this.auction = null;
+    for (const c of this.companies) if (c.status !== 'sold') c.status = 'unsold';
+    this.paused = false;
+    this.pausedAt = null;
+    this.log(`🛑 The host ended the game in round ${this.round}`);
+    this.finish();
+    return OK;
+  }
+
+  /** Mark the view as changed (e.g. host moved to another player). */
+  touchView() {
+    this.touch();
   }
 
   setConnected(playerId: string, connected: boolean) {
@@ -338,6 +392,7 @@ export class Game {
   placeBid(playerId: string, amount: number, now: number): ActionResult {
     const a = this.auction;
     const p = this.player(playerId);
+    if (this.paused) return fail('The game is paused.');
     if (this.phase !== 'auction' || !a) return fail('No auction is running.');
     if (this.settings.auctionMode !== 'open') return fail('This game uses sealed bids.');
     if (!p) return fail('Unknown player.');
@@ -360,6 +415,7 @@ export class Game {
 
   declareOut(playerId: string, now: number): ActionResult {
     const a = this.auction;
+    if (this.paused) return fail('The game is paused.');
     if (this.phase !== 'auction' || !a) return fail('No auction is running.');
     if (this.settings.auctionMode !== 'open') return fail('Use a sealed bid or pass.');
     if (!this.player(playerId)) return fail('Unknown player.');
@@ -372,9 +428,11 @@ export class Game {
     return OK;
   }
 
-  submitSealed(playerId: string, amount: number | null, now: number): ActionResult {
+  /** `fromAi` lets an AI decision that arrives during a pause still be recorded. */
+  submitSealed(playerId: string, amount: number | null, now: number, fromAi = false): ActionResult {
     const a = this.auction;
     const p = this.player(playerId);
+    if (this.paused && !fromAi) return fail('The game is paused.');
     if (this.phase !== 'auction' || !a) return fail('No auction is running.');
     if (this.settings.auctionMode !== 'sealed') return fail('This game uses open bidding.');
     if (!p) return fail('Unknown player.');
@@ -413,7 +471,7 @@ export class Game {
 
   private maybeEarlyClose(now: number) {
     const a = this.auction;
-    if (!a || this.phase !== 'auction') return;
+    if (!a || this.phase !== 'auction' || this.paused) return;
     if (a.aiPending.size > 0) return;
     if (this.settings.auctionMode === 'sealed') {
       const waiting = this.players.filter(
@@ -486,7 +544,7 @@ export class Game {
     this.lastSale = { companyId: company.def.id, winnerId, price, at: now };
     this.auction = null;
     this.phase = 'sold';
-    this.phaseEndsAt = now + TIMING.soldMs;
+    this.phaseEndsAt = now + this.soldMs();
     this.touch();
     this.emit({ type: 'auctionEnd', companyId: company.def.id, winnerId, price });
   }
@@ -724,6 +782,8 @@ export class Game {
     return {
       phase: this.phase,
       phaseEndsAt: this.phaseEndsAt,
+      paused: this.paused,
+      pausedAt: this.pausedAt,
       serverNow: now,
       round: this.round,
       totalRounds: this.totalRounds,

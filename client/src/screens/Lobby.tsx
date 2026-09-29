@@ -370,6 +370,24 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
               onCommit={(v) => set({ bidSeconds: v })}
             />
             <NumberField
+              label="Time added after each bid"
+              suffix="(seconds)"
+              value={s.bidResetSeconds}
+              min={LIMITS.bidResetSeconds[0]}
+              max={LIMITS.bidResetSeconds[1]}
+              disabled={!isHost || s.auctionMode === 'sealed'}
+              onCommit={(v) => set({ bidResetSeconds: v })}
+            />
+            <NumberField
+              label="Sold reveal"
+              suffix="(seconds)"
+              value={s.soldSeconds}
+              min={LIMITS.soldSeconds[0]}
+              max={LIMITS.soldSeconds[1]}
+              disabled={!isHost}
+              onCommit={(v) => set({ soldSeconds: v })}
+            />
+            <NumberField
               label="Intro before each round"
               suffix="(seconds)"
               value={s.introSeconds}
@@ -388,10 +406,12 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
               onCommit={(v) => set({ summarySeconds: v })}
             />
             <div className="full hint">
-              <strong>Bid timer:</strong> time to bid on each company (open bidding resets it after every bid).{' '}
+              <strong>Bid timer:</strong> time to bid on each company. <strong>Time added after each bid:</strong> in open
+              bidding, a new bid tops the clock back up to at least this much.{' '}
+              <strong>Sold reveal:</strong> how long the “Sold to…” screen shows after each lot.{' '}
               <strong>Intro:</strong> how long the round number{s.marketEvents ? ' and market news' : ''} show before
               bidding opens. <strong>Round summary:</strong> how long the payday screen shows after each round. Up to 10
-              minutes each; the host can always skip the intro and summary.
+              minutes each. During the game the host can skip screens, pause, or end the game.
             </div>
             <NumberField
               label="Turnover range: min"

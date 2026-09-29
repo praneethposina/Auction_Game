@@ -27,6 +27,10 @@ export interface GameSettings {
   introSeconds: number;
   /** How long the end-of-round payout summary shows before the next round. */
   summarySeconds: number;
+  /** How long the "sold" reveal shows after each auction. */
+  soldSeconds: number;
+  /** Open bidding: the countdown is topped up to at least this after every bid. */
+  bidResetSeconds: number;
   /** When AI players' reasoning becomes visible to everyone. */
   aiReasoning: 'live' | 'end';
 }
@@ -46,6 +50,8 @@ export const DEFAULT_SETTINGS: GameSettings = {
   bidSeconds: 10,
   introSeconds: 6,
   summarySeconds: 8,
+  soldSeconds: 4,
+  bidResetSeconds: 6,
   aiReasoning: 'live',
 };
 
@@ -59,6 +65,8 @@ export const LIMITS = {
   bidSeconds: [5, 600],
   introSeconds: [2, 600],
   summarySeconds: [2, 600],
+  soldSeconds: [1, 600],
+  bidResetSeconds: [2, 600],
 } as const;
 
 export const WIN_CONDITION_LABEL: Record<WinCondition, string> = {
@@ -71,13 +79,39 @@ export const WIN_CONDITION_LABEL: Record<WinCondition, string> = {
 // ── Players ─────────────────────────────────────────────────────
 
 export type PlayerKind = 'human' | 'bot' | 'llm';
-export type Persona = 'balanced' | 'tycoon' | 'value' | 'synergy' | 'gambler';
+export type Persona =
+  | 'balanced'
+  | 'quant'
+  | 'tycoon'
+  | 'value'
+  | 'synergy'
+  | 'specialist'
+  | 'bluechip'
+  | 'bargain'
+  | 'sniper'
+  | 'hoarder'
+  | 'momentum'
+  | 'contrarian'
+  | 'blocker'
+  | 'gambler';
 
 export const PERSONAS: Record<Persona, { label: string; blurb: string }> = {
   balanced: { label: 'Strategist', blurb: 'Weighs value, synergies and budget evenly.' },
+  quant: {
+    label: 'Quant',
+    blurb: 'Pure expected-value math. Reads sector heat from its own companies and shades sealed bids optimally.',
+  },
   tycoon: { label: 'Tycoon', blurb: 'Aggressive. Buys early and bids big on mega-caps.' },
-  value: { label: 'Value Investor', blurb: 'Patient. Only buys below fair value.' },
+  value: { label: 'Value Investor', blurb: 'Patient. Only buys well below fair value.' },
   synergy: { label: 'Empire Builder', blurb: 'Chases sector bonuses and named combos.' },
+  specialist: { label: 'Sector Specialist', blurb: 'Picks a sector or two and tries to own them outright.' },
+  bluechip: { label: 'Blue-Chip Collector', blurb: 'Only really wants Mega and Large companies.' },
+  bargain: { label: 'Mid-Cap Hunter', blurb: 'Hunts cheap Mid-tier companies the big spenders ignore.' },
+  sniper: { label: 'Late Sniper', blurb: 'Saves cash early, then pounces when rivals are broke.' },
+  hoarder: { label: 'Cash Hoarder', blurb: 'Keeps a thick cash cushion and rarely overpays. Safe, not flashy.' },
+  momentum: { label: 'Momentum Trader', blurb: 'Chases whatever this round’s market news is boosting.' },
+  contrarian: { label: 'Contrarian', blurb: 'Buys what the news is hurting while it’s unloved.' },
+  blocker: { label: 'Spoiler', blurb: 'Outbids rivals for the pieces that would complete their combos.' },
   gambler: { label: 'Gambler', blurb: 'Unpredictable. Loves a hunch and a bluff.' },
 };
 
@@ -257,6 +291,9 @@ export interface EventView {
 export interface GameView {
   phase: Phase;
   phaseEndsAt: number | null;
+  /** Host paused the game: countdowns are frozen at pausedAt. */
+  paused: boolean;
+  pausedAt: number | null;
   serverNow: number;
   round: number;
   totalRounds: number;
@@ -358,6 +395,8 @@ export interface ClientToServer {
   'game:sealed': (p: { amount: number | null }, ack: (r: Ack) => void) => void;
   'game:out': (ack: (r: Ack) => void) => void;
   'game:skip': (ack: (r: Ack) => void) => void;
+  'game:pause': (p: { paused: boolean }, ack: (r: Ack) => void) => void;
+  'game:end': (ack: (r: Ack) => void) => void;
   'game:rematch': (ack: (r: Ack) => void) => void;
   'ai:catalog': (ack: (r: Ack<AiCatalog>) => void) => void;
 }

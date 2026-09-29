@@ -5,6 +5,7 @@ import type { RoomView } from '../../../shared/types.ts';
 import { useServerNow } from '../components/common.tsx';
 import { FeedPanel, IntelPanel, MarketPanel, PlayersPanel, PortfolioPanel } from '../components/Panels.tsx';
 import { Stage } from '../components/Stage.tsx';
+import { request } from '../socket.ts';
 import { Results } from './Results.tsx';
 
 type Tab = 'auction' | 'portfolio' | 'intel' | 'market' | 'players';
@@ -50,6 +51,8 @@ export function Game({
   }
 
   const event = g.event ? EVENT_BY_ID[g.event.id] : null;
+  // While paused, freeze every countdown at the moment of pausing.
+  const clock = g.paused && g.pausedAt !== null ? g.pausedAt : now;
   const newIntel = Math.max(0, g.me.intel.length - seenIntel);
   const tabClass = (t: string) => (tab === t ? 'tab-active' : '');
 
@@ -82,6 +85,37 @@ export function Game({
         </div>
         <div className="row">
           <span className="chip hide-sm">Room {view.code}</span>
+          {isHost && (
+            <>
+              <button
+                className="btn sm"
+                title={g.paused ? 'Resume the game' : 'Pause every timer'}
+                onClick={async () => {
+                  const r = await request('game:pause', { paused: !g.paused });
+                  if (!r.ok) onError(r.error ?? 'Could not pause.');
+                }}
+              >
+                {g.paused ? '▶' : '⏸'}
+                <span className="hide-sm">{g.paused ? ' Resume' : ' Pause'}</span>
+              </button>
+              <button
+                className="btn sm danger"
+                title="End the game now and show final results"
+                onClick={async () => {
+                  if (
+                    !window.confirm(
+                      'End the game for everyone now? Final standings use current cash and companies; the round in progress won’t pay out.',
+                    )
+                  )
+                    return;
+                  const r = await request('game:end');
+                  if (!r.ok) onError(r.error ?? 'Could not end the game.');
+                }}
+              >
+                🛑<span className="hide-sm"> End game</span>
+              </button>
+            </>
+          )}
           <button
             className="btn sm ghost"
             onClick={() => {
@@ -99,7 +133,12 @@ export function Game({
       </div>
 
       <div className={`col-stage ${tabClass('auction')}`} data-tab="auction">
-        <Stage g={g} now={now} isHost={isHost} onError={onError} />
+        {g.paused && (
+          <div className="paused-banner" role="status">
+            ⏸ Paused by the host. Timers are frozen{isHost ? '. Press Resume to continue.' : '.'}
+          </div>
+        )}
+        <Stage g={g} now={clock} isHost={isHost} onError={onError} />
       </div>
 
       <div className="col-right">

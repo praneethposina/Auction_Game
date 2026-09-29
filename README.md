@@ -14,8 +14,11 @@ friends or against AI players powered by free, open-weight LLMs.
 - **Running costs.** Thin-margin businesses can lose money.
 - **Open or sealed-bid auctions** and **4 win conditions**: net worth, return on spend, cash, or
   portfolio value.
-- **AI players.** Built-in bots, or LLMs via Groq, OpenRouter free models, Cerebras, Google Gemini
-  or Hugging Face. Watch their reasoning after each sale.
+- **AI players.** 14 built-in bot personalities (Quant, Tycoon, Sector Specialist, Spoiler, …)
+  that infer hidden sector heat and bid by the math. Or LLMs via Groq, OpenRouter free models,
+  Cerebras, Google Gemini or Hugging Face. Watch their reasoning after each sale.
+- **Host controls.** Every screen timer is adjustable (up to 10 minutes). The host can skip,
+  pause/resume, or end the game at any time.
 - **Quick accounts.** Username and password only, no email. Save your free API keys once
   (encrypted on the server) and add LLM players to any game you host, with no server setup.
 
@@ -113,7 +116,7 @@ npm start       # serves the game and client on $PORT (default 3001)
 | `npm run build` / `npm start` | Production build and server |
 | `npm test` | Engine, AI and account tests (set `TEST_DATABASE_URL` to also test Postgres) |
 | `npm run typecheck` | TypeScript check |
-| `npm run simulate -- 200 5 20 open` | Plays 200 bot-only games and prints balance stats |
+| `npm run simulate -- 300 5 20 open netWorth` | Plays bot-only games with mixed personalities and prints win rates per personality |
 
 ## Project layout
 
