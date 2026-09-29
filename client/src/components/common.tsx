@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import type { Tier } from '../../../shared/data/companies.ts';
 import { SECTORS, type SectorId } from '../../../shared/data/sectors.ts';
 import { TIER_LABEL } from '../../../shared/economy.ts';
+import { PERSONAS, type PlayerKind, type PublicAiSpec } from '../../../shared/types.ts';
 
 export function SectorChip({ sector, short = false }: { sector: SectorId; short?: boolean }) {
   const s = SECTORS[sector];
@@ -118,4 +119,21 @@ export function Segmented<T extends string>({
 export function PlayerTag({ kind, model }: { kind: 'human' | 'bot' | 'llm'; model?: string }) {
   if (kind === 'human') return null;
   return <span className="chip ai">{kind === 'llm' ? `🤖 ${model ?? 'LLM'}` : '⚙️ Bot'}</span>;
+}
+
+/** An AI player's personality (strategy) under its name. Hidden when the host turned it off. */
+export function PersonaLine({ kind, ai, blurb = true }: { kind: PlayerKind; ai?: PublicAiSpec; blurb?: boolean }) {
+  if (kind === 'human' || !ai) return null;
+  if (!ai.persona) return <div className="persona-line faint">🎭 Strategy hidden by the host</div>;
+  const p = PERSONAS[ai.persona];
+  return (
+    <div className="persona-line" title={p.blurb}>
+      🎭 <strong>{p.label}</strong>
+      {blurb && <span className="muted"> · {p.blurb}</span>}
+    </div>
+  );
+}
+
+export function personaLabel(ai?: PublicAiSpec): string | null {
+  return ai?.persona ? PERSONAS[ai.persona].label : null;
 }

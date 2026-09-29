@@ -11,7 +11,7 @@ import {
   type RoomView,
   type WinCondition,
 } from '../../../shared/types.ts';
-import { PlayerTag, Segmented, Toggle } from '../components/common.tsx';
+import { PersonaLine, PlayerTag, Segmented, Toggle } from '../components/common.tsx';
 import { request } from '../socket.ts';
 
 const WIN_HINT: Record<WinCondition, string> = {
@@ -298,10 +298,10 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
                     <div style={{ fontWeight: 600 }}>
                       {p.name} {p.id === view.meId && <span className="faint small">(you)</span>}
                     </div>
-                    {p.ai && (
+                    <PersonaLine kind={p.kind} ai={p.ai} />
+                    {p.ai?.provider && (
                       <div className="tiny muted">
-                        {PERSONAS[p.ai.persona].label}
-                        {p.ai.provider ? ` · ${p.ai.provider}` : ''}
+                        {p.ai.provider}
                         {p.ai.keySource === 'account' && p.ai.keyOwner ? ` · ${p.ai.keyOwner}’s key` : ''}
                         {p.ai.keySource === 'server' ? ' · server key' : ''}
                       </div>
@@ -497,6 +497,13 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
                 checked={s.catchUpIntel}
                 disabled={!isHost}
                 onChange={(v) => set({ catchUpIntel: v })}
+              />
+              <Toggle
+                label="Show AI personalities"
+                hint="Show each AI player's strategy (Quant, Tycoon, Spoiler…) under its name. Off keeps strategies secret from other players until the end."
+                checked={s.showPersonas}
+                disabled={!isHost}
+                onChange={(v) => set({ showPersonas: v })}
               />
               <Toggle
                 label="Show AI reasoning live"

@@ -33,6 +33,8 @@ export interface GameSettings {
   bidResetSeconds: number;
   /** When AI players' reasoning becomes visible to everyone. */
   aiReasoning: 'live' | 'end';
+  /** Show each AI player's personality (strategy) to everyone. Off: only the host sees it until the end. */
+  showPersonas: boolean;
 }
 
 export const DEFAULT_SETTINGS: GameSettings = {
@@ -53,6 +55,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
   soldSeconds: 4,
   bidResetSeconds: 6,
   aiReasoning: 'live',
+  showPersonas: true,
 };
 
 export const LIMITS = {
@@ -127,13 +130,16 @@ export interface AiSpec {
   keyOwner?: string;
 }
 
+/** AI details as sent to a client. `persona` is withheld when the host hides personalities. */
+export type PublicAiSpec = Omit<AiSpec, 'persona'> & { persona?: Persona };
+
 export interface LobbyPlayer {
   id: string;
   name: string;
   kind: PlayerKind;
   isHost: boolean;
   connected: boolean;
-  ai?: AiSpec;
+  ai?: PublicAiSpec;
 }
 
 // ── Game views (what each client sees) ──────────────────────────
@@ -160,7 +166,7 @@ export interface PublicPlayer {
   kind: PlayerKind;
   isHost: boolean;
   connected: boolean;
-  ai?: AiSpec;
+  ai?: PublicAiSpec;
   companyIds: string[];
 }
 

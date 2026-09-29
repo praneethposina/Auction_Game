@@ -3,7 +3,7 @@ import { COMBO_BY_ID } from '../../../shared/data/combos.ts';
 import { SECTORS } from '../../../shared/data/sectors.ts';
 import { money, pct } from '../../../shared/economy.ts';
 import type { GameView } from '../../../shared/types.ts';
-import { Monogram, PlayerTag, SectorChip, TierChip } from './common.tsx';
+import { Monogram, PersonaLine, personaLabel, PlayerTag, SectorChip, TierChip } from './common.tsx';
 
 type PanelProps = { g: GameView; tabClass: (tab: string) => string };
 
@@ -229,6 +229,7 @@ export function PlayersPanel({ g, tabClass }: PanelProps) {
                 {p.id === g.me?.id && <span className="faint small">(you)</span>}
                 <PlayerTag kind={p.kind} model={p.ai?.modelLabel} />
               </div>
+              <PersonaLine kind={p.kind} ai={p.ai} />
               <div className="tiny muted" style={{ marginTop: 3 }}>
                 {p.companyIds.length === 0 ? 'No companies yet' : p.companyIds.map(nameOf).join(' · ')}
               </div>
@@ -246,6 +247,7 @@ export function FeedPanel({ g, tabClass }: PanelProps) {
   const hasAi = g.players.some((p) => p.kind !== 'human');
   const nameOf = (id: string) => g.players.find((p) => p.id === id)?.name ?? '?';
   const companyName = (id: string) => g.companies.find((c) => c.id === id)?.name ?? id;
+  const personaOf = (id: string) => personaLabel(g.players.find((p) => p.id === id)?.ai);
   return (
     <div className={`card ${tabClass('players')}`} data-tab="players">
       <h3>Activity</h3>
@@ -278,7 +280,10 @@ export function FeedPanel({ g, tabClass }: PanelProps) {
           {[...g.aiThoughts].reverse().map((t) => (
             <div key={`${t.playerId}-${t.at}`} className="thought">
               <div className="spread">
-                <strong>{nameOf(t.playerId)}</strong>
+                <strong>
+                  {nameOf(t.playerId)}
+                  {personaOf(t.playerId) && <span className="faint small"> · {personaOf(t.playerId)}</span>}
+                </strong>
                 <span className="tiny muted">
                   {companyName(t.companyId)} · {t.maxBid > 0 ? `max ${money(t.maxBid)}` : 'pass'}
                   {t.source === 'fallback' ? ' · backup' : ''}

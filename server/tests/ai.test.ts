@@ -98,6 +98,7 @@ describe('AiDirector', () => {
     const thought = game.aiThoughts.find((t) => t.playerId === 'llm')!;
     expect(thought.source).toBe('fallback');
     expect(thought.reason).toContain('rate limited');
+    expect(thought.reason).toContain('backup brain');
     game.submitSealed('h', null, clock());
     expect(game.phase).toBe('sold');
     director.dispose();
@@ -108,7 +109,7 @@ describe('AiDirector', () => {
     const director = new AiDirector(game, clock, 2, {
       botDelay: false,
       credentialsFor: creds,
-      llm: async () => ({ maxBid: 150, reason: 'fair value', source: 'llm' }),
+      llm: async () => ({ maxBid: 150, reason: 'fair value', publicReason: 'fair value', source: 'llm' }),
     });
     setClock(100000);
     game.tick(clock());

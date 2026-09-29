@@ -7,6 +7,7 @@ import {
   type GameSettings,
   type LobbyPlayer,
   type PlayerKind,
+  type PublicAiSpec,
   type RoomView,
 } from '../shared/types.ts';
 import { AiDirector } from './ai/director.ts';
@@ -41,7 +42,8 @@ const BOT_NAMES = [
   'Midas Cap',
 ];
 
-export interface RoomPlayer extends LobbyPlayer {
+export interface RoomPlayer extends Omit<LobbyPlayer, 'ai'> {
+  ai?: AiSpec;
   token: string;
   sockets: Set<string>;
   disconnectedAt: number | null;
@@ -92,6 +94,7 @@ export function sanitizeSettings(current: GameSettings, patch: Partial<GameSetti
   if (typeof patch.marketEvents === 'boolean') next.marketEvents = patch.marketEvents;
   if (typeof patch.catchUpIntel === 'boolean') next.catchUpIntel = patch.catchUpIntel;
   if (patch.aiReasoning === 'live' || patch.aiReasoning === 'end') next.aiReasoning = patch.aiReasoning;
+  if (typeof patch.showPersonas === 'boolean') next.showPersonas = patch.showPersonas;
   return next;
 }
 
@@ -353,14 +356,20 @@ export class Room {
   }
 
   viewFor(playerId: string, now: number): RoomView {
+    // Personalities are strategy info: hidden from non-hosts when the host says so, until the game ends.
+    const reveal = this.settings.showPersonas || playerId === this.hostId || this.status === 'finished';
+    const redact = <T extends { ai?: PublicAiSpec }>(p: T): T =>
+      reveal || !p.ai ? p : { ...p, ai: { ...p.ai, persona: undefined } };
+    const game = this.game ? this.game.viewFor(playerId, now) : null;
+    if (game) game.players = game.players.map(redact);
     return {
       code: this.code,
       hostId: this.hostId,
       meId: playerId,
       status: this.status,
-      players: this.players.map(({ id, name, kind, isHost, connected, ai }) => ({ id, name, kind, isHost, connected, ai })),
+      players: this.players.map(({ id, name, kind, isHost, connected, ai }) => redact({ id, name, kind, isHost, connected, ai })),
       settings: this.settings,
-      game: this.game ? this.game.viewFor(playerId, now) : null,
+      game,
     };
   }
 }

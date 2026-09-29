@@ -126,7 +126,7 @@ export class Game {
   cursor = 0;
   auction: AuctionState | null = null;
   lastSale: SaleState | null = null;
-  aiThoughts: AiThought[] = [];
+  aiThoughts: (AiThought & { publicReason: string })[] = [];
   results: FinalResults | null = null;
   version = 0;
 
@@ -460,8 +460,8 @@ export class Game {
     if (!pending) this.maybeEarlyClose(now);
   }
 
-  recordAiThought(thought: AiThought) {
-    this.aiThoughts.push(thought);
+  recordAiThought(thought: AiThought & { publicReason?: string }) {
+    this.aiThoughts.push({ ...thought, publicReason: thought.publicReason ?? thought.reason });
     this.touch();
   }
 
@@ -772,9 +772,13 @@ export class Game {
       : null;
 
     const settled = new Set(this.companies.filter((c) => c.status === 'sold' || c.status === 'unsold').map((c) => c.def.id));
-    const aiThoughts =
+    // During the game only the public reason is shown; full reasoning (which may cite private
+    // intel) is revealed once the game is over.
+    const aiThoughts: AiThought[] =
       finished || this.settings.aiReasoning === 'live'
-        ? this.aiThoughts.filter((t) => finished || settled.has(t.companyId))
+        ? this.aiThoughts
+            .filter((t) => finished || settled.has(t.companyId))
+            .map(({ publicReason, ...t }) => ({ ...t, reason: finished ? t.reason : publicReason }))
         : [];
 
     const event = this.currentEvent();

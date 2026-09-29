@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { SECTORS, type SectorId } from '../../../shared/data/sectors.ts';
 import { money, pct } from '../../../shared/economy.ts';
 import { WIN_CONDITION_LABEL, type RoomView, type StandingView } from '../../../shared/types.ts';
-import { Monogram, PlayerTag } from '../components/common.tsx';
+import { Monogram, personaLabel, PlayerTag } from '../components/common.tsx';
 import { request } from '../socket.ts';
 
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -58,6 +58,7 @@ export function Results({ view, onLeave, onError }: { view: RoomView; onLeave: (
               <div key={s.playerId} className={`place ${i === 1 ? 'first' : ''}`}>
                 <div className="medal">{MEDALS[s.rank - 1] ?? `#${s.rank}`}</div>
                 <div style={{ fontWeight: 700, marginTop: 4 }}>{player(s.playerId).name}</div>
+                {personaLabel(player(s.playerId).ai) && <div className="tiny muted">🎭 {personaLabel(player(s.playerId).ai)}</div>}
                 <div className="num gold" style={{ fontSize: 20, fontWeight: 700 }}>
                   {metricText(s, r.winCondition)}
                 </div>
@@ -178,7 +179,12 @@ export function Results({ view, onLeave, onError }: { view: RoomView; onLeave: (
                 {g.aiThoughts.map((t) => (
                   <div key={`${t.playerId}-${t.at}`} className="thought">
                     <div className="spread">
-                      <strong>{player(t.playerId).name}</strong>
+                      <strong>
+                        {player(t.playerId).name}
+                        {personaLabel(player(t.playerId).ai) && (
+                          <span className="faint small"> · {personaLabel(player(t.playerId).ai)}</span>
+                        )}
+                      </strong>
                       <span className="tiny muted">
                         {company(t.companyId).name} · {t.maxBid > 0 ? `max ${money(t.maxBid)}` : 'pass'}
                         {company(t.companyId).ownerId === t.playerId ? ' · won' : ''}

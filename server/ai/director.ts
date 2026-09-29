@@ -2,7 +2,7 @@ import type { Game, GameEvent } from '../game/engine.ts';
 import { TIMING } from '../game/engine.ts';
 import { createRng, type Rng } from '../game/rng.ts';
 import { botDecision, type AiDecision } from './bot.ts';
-import { llmDecision } from './llm.ts';
+import { LlmError, llmDecision } from './llm.ts';
 import type { Credentials } from './models.ts';
 
 /**
@@ -17,6 +17,8 @@ export class AiDirector {
   private readonly decisions = new Map<string, AiDecision>();
   private readonly nextActAt = new Map<string, number>();
   private seq = 0;
+  /** AI players whose provider can't serve them any more (no credits, bad key), with the reason. */
+  private readonly benched = new Map<string, string>();
   private readonly unsubscribe: () => void;
 
   private readonly llm: typeof llmDecision;
@@ -69,6 +71,12 @@ export class AiDirector {
       const persona = p.ai?.persona ?? 'balanced';
       const decide = async (): Promise<AiDecision> => {
         const credentials = this.credentialsFor(p.id);
+        const benched = this.benched.get(p.id);
+        if (p.kind === 'llm' && benched) {
+          const fb = botDecision(this.game, p, companyId, persona, this.rng, 'fallback');
+          const note = `[${benched}; the backup brain is playing for it]`;
+          return { ...fb, reason: `${note} ${fb.reason}`, publicReason: `${note} ${fb.publicReason}` };
+        }
         if (p.kind === 'llm' && p.ai?.model && credentials) {
           try {
             return await this.llm({
@@ -81,9 +89,21 @@ export class AiDirector {
               timeoutMs,
             });
           } catch (err) {
-            const why = err instanceof Error ? (err.name === 'TimeoutError' ? 'timed out' : err.message) : 'error';
+            const why =
+              err instanceof Error
+                ? err.name === 'TimeoutError' || err.name === 'AbortError'
+                  ? 'took too long to answer'
+                  : err.message
+                : 'failed';
             const fb = botDecision(this.game, p, companyId, persona, this.rng, 'fallback');
-            return { ...fb, reason: `[LLM ${why}, used backup brain] ${fb.reason}` };
+            const label = p.ai.modelLabel ?? p.ai.model;
+            if (err instanceof LlmError && err.fatal) {
+              this.benched.set(p.id, `${label} ${why}`);
+              const note = `[${label} ${why}. It won't be called again this game; the backup brain plays for it]`;
+              return { ...fb, reason: `${note} ${fb.reason}`, publicReason: `${note} ${fb.publicReason}` };
+            }
+            const note = `[${label} ${why}; the backup brain bid instead]`;
+            return { ...fb, reason: `${note} ${fb.reason}`, publicReason: `${note} ${fb.publicReason}` };
           }
         }
         if (this.botDelay) await new Promise((r) => setTimeout(r, 250 + this.rng.next() * 900));
@@ -103,6 +123,7 @@ export class AiDirector {
       round: this.game.round,
       maxBid: d.maxBid,
       reason: d.reason,
+      publicReason: d.publicReason,
       source: d.source,
       at: now,
     });

@@ -183,6 +183,20 @@ Ties are broken by net worth.
   - If a call fails or times out, the bot brain steps in and the reasoning is tagged "backup".
 - The auction waits for AI players that are still thinking, for at most 12 seconds past the timer.
 - After each sale, every AI's maximum and reasoning for that lot can be shown (the "AI minds" feed).
+  During the game that reasoning is **public-safe**. Bots describe only public facts (synergy with
+  companies everyone can see, the news, combos in play, payouts left). LLMs are told their reason
+  is read out to everyone, and a server filter holds back any LLM reason that mentions intel,
+  sector heat, its cash or its own turnovers. Full reasoning is revealed on the results screen.
+- **Personalities** show under each AI's name. The host can turn "Show AI personalities" off to
+  keep strategies secret from other players (the host still sees them) until the game ends.
+- **LLM reliability:**
+  - JSON mode is used where the provider supports it, and the parser also accepts loose JSON,
+    `$1.2B`-style amounts and plain-text answers.
+  - A thinking model that runs out of tokens is retried with more room.
+  - An unreadable answer gets a one-line "restate as JSON" follow-up.
+  - Rate limits get one short retry, and at most 3 requests run at once per provider key.
+  - A key that is out of credits or rejected is not called again that game; the backup brain
+    plays for it and says why.
 
 ## Ideas parked for later
 

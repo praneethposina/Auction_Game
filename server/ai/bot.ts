@@ -8,7 +8,10 @@ import { activeRivals, appraise, averageUpcomingTerminal, type Appraisal } from 
 
 export interface AiDecision {
   maxBid: number;
+  /** Full reasoning, which may rely on private intel. Revealed only when the game ends. */
   reason: string;
+  /** Safe to show everyone during the game: only public facts. */
+  publicReason: string;
   source: 'llm' | 'bot' | 'fallback';
 }
 
@@ -240,5 +243,21 @@ export function botDecision(
         : maxBid > a.value * 1.02
           ? `Paying a premium: up to ${money(maxBid)}.`
           : `Up to ${money(maxBid)}.`;
-  return { maxBid, reason: `${bits.join('; ')}. ${verdict}`, source };
+
+  // What everyone may see live: synergy with companies everyone can see, the public news,
+  // combos in play and timing. No estimates, intel, heat reads, cash or strategy tells.
+  const publicBits: string[] = [];
+  if (a.synergy > 0) publicBits.push(`fits my portfolio (${pct(a.synergy)}${a.newCombos.length ? `, ${a.newCombos.join(', ')}` : ''})`);
+  if (a.eventDemand !== 1 || a.eventCost !== 1) publicBits.push(`this round's news ×${a.eventDemand.toFixed(2)}`);
+  if (a.potentialNote) publicBits.push(a.potentialNote);
+  if (a.denialNote) publicBits.push(a.denialNote);
+  publicBits.push(`${a.payoutsLeft} payout${a.payoutsLeft === 1 ? '' : 's'} left`);
+  const publicVerdict =
+    maxBid === 0 ? 'Passing.' : maxBid < target * 0.95 ? `Up to ${money(maxBid)}, keeping cash for later lots.` : `Up to ${money(maxBid)}.`;
+  return {
+    maxBid,
+    reason: `${bits.join('; ')}. ${verdict}`,
+    publicReason: `${publicBits.join('; ')}. ${publicVerdict}`,
+    source,
+  };
 }

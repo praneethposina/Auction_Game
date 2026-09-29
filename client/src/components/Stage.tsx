@@ -13,7 +13,7 @@ import {
 } from '../../../shared/economy.ts';
 import type { GameView, PublicCompany } from '../../../shared/types.ts';
 import { request } from '../socket.ts';
-import { Countdown, Monogram, SectorChip, TierChip } from './common.tsx';
+import { Countdown, Monogram, personaLabel, SectorChip, TierChip } from './common.tsx';
 
 interface StageProps {
   g: GameView;
@@ -481,7 +481,12 @@ function SoldView({ g, now, isHost }: StageProps) {
           {thoughts.map((t) => (
             <div key={`${t.playerId}-${t.at}`} className="thought">
               <div className="spread">
-                <strong>{nameOf(g, t.playerId)}</strong>
+                <strong>
+                  {nameOf(g, t.playerId)}
+                  {personaLabel(g.players.find((p) => p.id === t.playerId)?.ai) && (
+                    <span className="faint small"> · {personaLabel(g.players.find((p) => p.id === t.playerId)?.ai)}</span>
+                  )}
+                </strong>
                 <span className="num small">{t.maxBid > 0 ? `max ${money(t.maxBid)}` : 'passed'}</span>
               </div>
               <div className="muted">{t.reason}</div>
