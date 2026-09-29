@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AccountModal } from './components/AccountModal.tsx';
 import { Game } from './screens/Game.tsx';
 import { Home } from './screens/Home.tsx';
 import { Lobby } from './screens/Lobby.tsx';
@@ -7,6 +8,14 @@ import { useRoom } from './useRoom.ts';
 export function App() {
   const room = useRoom();
   const [toast, setToast] = useState<string | null>(null);
+  const [showOffline, setShowOffline] = useState(false);
+
+  // Only warn about the connection if it stays down (signing in briefly reconnects the socket).
+  useEffect(() => {
+    if (room.connected) return setShowOffline(false);
+    const id = setTimeout(() => setShowOffline(true), 1500);
+    return () => clearTimeout(id);
+  }, [room.connected]);
 
   useEffect(() => {
     if (!toast) return;
@@ -27,8 +36,9 @@ export function App() {
 
   return (
     <>
-      {!room.connected && <div className="banner">Connection lost. Reconnecting…</div>}
+      {showOffline && <div className="banner">Connection lost. Reconnecting…</div>}
       {screen}
+      <AccountModal />
       {toast && (
         <div className="toast" role="alert" onClick={() => setToast(null)}>
           {toast}

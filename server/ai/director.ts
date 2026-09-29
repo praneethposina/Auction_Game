@@ -3,6 +3,7 @@ import { TIMING } from '../game/engine.ts';
 import { createRng, type Rng } from '../game/rng.ts';
 import { botDecision, type AiDecision } from './bot.ts';
 import { llmDecision } from './llm.ts';
+import type { Credentials } from './models.ts';
 
 /**
  * Drives the AI players of one game.
@@ -20,15 +21,21 @@ export class AiDirector {
 
   private readonly llm: typeof llmDecision;
   private readonly botDelay: boolean;
+  private readonly credentialsFor: (playerId: string) => Credentials | undefined;
 
   constructor(
     private readonly game: Game,
     private readonly now: () => number,
     seed: number,
-    opts: { llm?: typeof llmDecision; botDelay?: boolean } = {},
+    opts: {
+      llm?: typeof llmDecision;
+      botDelay?: boolean;
+      credentialsFor?: (playerId: string) => Credentials | undefined;
+    } = {},
   ) {
     this.llm = opts.llm ?? llmDecision;
     this.botDelay = opts.botDelay ?? true;
+    this.credentialsFor = opts.credentialsFor ?? (() => undefined);
     this.rng = createRng(seed);
     this.unsubscribe = game.on((e) => this.onEvent(e));
   }
@@ -60,14 +67,15 @@ export class AiDirector {
       this.game.setAiPending(p.id, true, now);
       const persona = p.ai?.persona ?? 'balanced';
       const decide = async (): Promise<AiDecision> => {
-        if (p.kind === 'llm' && p.ai?.provider && p.ai.model) {
+        const credentials = this.credentialsFor(p.id);
+        if (p.kind === 'llm' && p.ai?.model && credentials) {
           try {
             return await this.llm({
               game: this.game,
               player: p,
               companyId,
               persona,
-              provider: p.ai.provider,
+              credentials,
               model: p.ai.model,
               timeoutMs,
             });

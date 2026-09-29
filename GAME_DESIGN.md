@@ -138,7 +138,8 @@ Ties are broken by net worth.
 - **Built-in bots** need no API key. They estimate turnover from tier plus their private intel,
   value the company over the payouts left plus its end value, add synergy effects, and apply a
   budget pace and a personality: Strategist, Tycoon, Value Investor, Empire Builder, or Gambler.
-- **LLM players** get the same private view a human has (rules, cash, portfolio, intel, news,
+- **LLM players** run on the host's own saved API key (or a key shared by the server owner) and
+  get the same private view a human has (rules, cash, portfolio, intel, news,
   opponents' holdings, relevant combos) and answer with `{"max_bid", "reason"}`.
   - Each LLM is called **once per company**, which keeps free-tier usage low.
   - In open auctions the server then raises on its behalf, in human-like steps, up to that limit.

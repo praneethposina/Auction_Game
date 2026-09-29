@@ -10,7 +10,7 @@ import {
   type RoomView,
 } from '../shared/types.ts';
 import { AiDirector } from './ai/director.ts';
-import { providerById, isConfigured } from './ai/models.ts';
+import { providerById, type Credentials } from './ai/models.ts';
 import { Game } from './game/engine.ts';
 import { randomSeed } from './game/rng.ts';
 
@@ -87,6 +87,8 @@ export class Room {
   game: Game | null = null;
   lastActivity = Date.now();
   private director: AiDirector | null = null;
+  /** Keys powering LLM players. Server memory only, never sent to clients. */
+  private readonly aiCredentials = new Map<string, Credentials>();
   private sentVersion = -1;
   private dirty = true;
 
@@ -149,19 +151,43 @@ export class Room {
     return { ok: true, data: this.addPlayer(name, 'human') };
   }
 
-  addAi(byId: string, spec: Partial<AiSpec> & { name?: string }): Result {
+  /** Check that an AI can be added before any key lookups happen. */
+  canAddAi(byId: string): Result {
     if (byId !== this.hostId) return fail('Only the host can add AI players.');
     if (this.status !== 'lobby') return fail('The game has already started.');
     if (this.players.length >= this.settings.maxPlayers) return fail('The room is full. Raise the player limit first.');
+    return { ok: true };
+  }
+
+  /**
+   * Add an AI player. LLM players need credentials, resolved by the caller from the host's
+   * account or the server's env keys.
+   */
+  addAi(
+    byId: string,
+    spec: Partial<AiSpec> & { name?: string },
+    credentials?: Credentials,
+    keyOwner?: string,
+  ): Result {
+    const allowed = this.canAddAi(byId);
+    if (!allowed.ok) return allowed;
     const persona = spec.persona && spec.persona in PERSONAS ? spec.persona : 'balanced';
     if (spec.provider) {
       const provider = providerById(spec.provider);
       if (!provider) return fail('Unknown AI provider.');
-      if (!isConfigured(provider)) return fail(`${provider.label} is not configured on the server (set ${provider.envVar}).`);
+      if (!credentials) return fail(`Add a ${provider.label} API key to your account first.`);
       if (typeof spec.model !== 'string' || !spec.model.trim()) return fail('Pick a model.');
       const modelLabel = (spec.modelLabel || spec.model).slice(0, 40);
       const name = cleanName(spec.name) ?? modelLabel.slice(0, 20);
-      this.addPlayer(name, 'llm', { persona, provider: provider.id, model: spec.model.trim(), modelLabel });
+      const p = this.addPlayer(name, 'llm', {
+        persona,
+        provider: provider.id,
+        model: spec.model.trim().slice(0, 120),
+        modelLabel,
+        keySource: credentials.source,
+        keyOwner: credentials.source === 'account' ? keyOwner : undefined,
+      });
+      this.aiCredentials.set(p.id, credentials);
       return { ok: true };
     }
     const used = new Set(this.players.map((p) => p.name));
@@ -177,6 +203,7 @@ export class Room {
     const idx = this.players.findIndex((p) => p.id === targetId);
     if (idx < 0) return fail('No such player.');
     this.players.splice(idx, 1);
+    this.aiCredentials.delete(targetId);
     this.touch();
     return { ok: true };
   }
@@ -221,7 +248,9 @@ export class Room {
       now,
     });
     for (const p of this.players) this.game.setConnected(p.id, p.connected);
-    this.director = new AiDirector(this.game, () => Date.now(), randomSeed());
+    this.director = new AiDirector(this.game, () => Date.now(), randomSeed(), {
+      credentialsFor: (id) => this.aiCredentials.get(id),
+    });
     this.status = 'playing';
     this.touch();
     return { ok: true };

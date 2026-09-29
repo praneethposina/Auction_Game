@@ -79,6 +79,10 @@ export interface AiSpec {
   provider?: string;
   model?: string;
   modelLabel?: string;
+  /** Whose key powers this LLM player. */
+  keySource?: 'account' | 'server';
+  /** Username of the account whose key is used. */
+  keyOwner?: string;
 }
 
 export interface LobbyPlayer {
@@ -287,15 +291,36 @@ export interface ModelOption {
 export interface ProviderStatus {
   id: string;
   label: string;
-  configured: boolean;
   envVar: string;
   signupUrl: string;
   freeTier: string;
+  keyHint: string;
+  /** Players can save their own key for this provider. */
+  userKeys: boolean;
+  /** The server owner configured a shared key. */
+  serverKey: boolean;
+  /** The current player has a saved key in their account. */
+  yourKey: boolean;
 }
 
 export interface AiCatalog {
   providers: ProviderStatus[];
   models: ModelOption[];
+}
+
+// ── Accounts ────────────────────────────────────────────────────
+
+export interface AccountUser {
+  id: string;
+  username: string;
+}
+
+export interface SavedKey {
+  provider: string;
+  masked: string;
+  updatedAt: number;
+  /** False if the key can no longer be decrypted (server secret changed). */
+  readable: boolean;
 }
 
 // ── Socket messages ─────────────────────────────────────────────

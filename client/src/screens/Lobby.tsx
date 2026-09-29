@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AccountButton, useAuth } from '../auth.tsx';
 import { money } from '../../../shared/economy.ts';
 import {
   LIMITS,
@@ -67,6 +68,7 @@ function NumberField({
 }
 
 function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: boolean }) {
+  const { user, keysVersion, openAccount } = useAuth();
   const [catalog, setCatalog] = useState<AiCatalog | null>(null);
   const [kind, setKind] = useState<'bot' | 'llm'>('bot');
   const [persona, setPersona] = useState<Persona>('balanced');
@@ -74,20 +76,20 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
   const [model, setModel] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  const firstLoad = useRef(true);
 
   useEffect(() => {
     void request<AiCatalog>('ai:catalog').then((r) => {
       if (!r.ok || !r.data) return;
       setCatalog(r.data);
-      const first = r.data.providers.find((p) => p.configured);
-      if (first) {
-        setProvider(first.id);
-        setKind('llm');
-      }
+      const usable = r.data.providers.filter((p) => p.yourKey || p.serverKey);
+      setProvider((cur) => (usable.some((p) => p.id === cur) ? cur : (usable[0]?.id ?? '')));
+      if (firstLoad.current && usable.length > 0) setKind('llm');
+      firstLoad.current = false;
     });
-  }, []);
+  }, [keysVersion]);
 
-  const configured = catalog?.providers.filter((p) => p.configured) ?? [];
+  const usable = catalog?.providers.filter((p) => p.yourKey || p.serverKey) ?? [];
   const models = useMemo(() => catalog?.models.filter((m) => m.provider === provider) ?? [], [catalog, provider]);
   useEffect(() => {
     if (models.length && !models.some((m) => m.model === model)) setModel(models[0].model);
@@ -106,6 +108,8 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
     else setName('');
   };
 
+  const current = usable.find((p) => p.id === provider);
+
   return (
     <div className="card stack">
       <h3>Add AI players</h3>
@@ -118,61 +122,48 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
         ]}
       />
 
-      {kind === 'llm' && (
-        <>
-          {configured.length === 0 ? (
-            <div className="callout stack" style={{ gap: 6 }}>
-              <div>
-                No LLM provider is configured on the server yet. Add a free API key to <code>.env</code> and restart:
-              </div>
-              {catalog?.providers.map((p) => (
-                <div key={p.id}>
-                  <strong>{p.label}</strong>: <code>{p.envVar}</code>.{' '}
-                  <span className="faint">{p.freeTier}</span>{' '}
-                  <a href={p.signupUrl} target="_blank" rel="noreferrer">
-                    Get a key
-                  </a>
-                </div>
-              ))}
+      {kind === 'llm' &&
+        (usable.length === 0 ? (
+          <div className="callout stack" style={{ gap: 8 }}>
+            <div>
+              <strong>Bring LLM players with a free API key.</strong> Save a key once in your account and it works in every
+              game you host. Groq takes about a minute to sign up for, with no card needed.
             </div>
-          ) : (
-            <>
-              <label className="field">
-                Provider
-                <select className="select" value={provider} onChange={(e) => setProvider(e.target.value)}>
-                  {configured.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="hint">{catalog?.providers.find((p) => p.id === provider)?.freeTier}</div>
-              <label className="field">
-                Model
-                <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
-                  {models.map((m) => (
-                    <option key={m.model} value={m.model}>
-                      {m.recommended ? '★ ' : ''}
-                      {m.label}
-                      {m.note ? ` · ${m.note}` : ''}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {catalog && catalog.providers.some((p) => !p.configured) && (
-                <div className="hint">
-                  More providers:{' '}
-                  {catalog.providers
-                    .filter((p) => !p.configured)
-                    .map((p) => `${p.label} (${p.envVar})`)
-                    .join(', ')}
-                </div>
-              )}
-            </>
-          )}
-        </>
-      )}
+            <button className="btn primary" onClick={() => openAccount(user ? 'keys' : 'signup')}>
+              {user ? 'Add an API key' : 'Create account & add a key'}
+            </button>
+          </div>
+        ) : (
+          <>
+            <label className="field">
+              Provider
+              <select className="select" value={provider} onChange={(e) => setProvider(e.target.value)}>
+                {usable.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label} {p.yourKey ? '· your key' : '· shared server key'}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {current && <div className="hint">{current.freeTier}</div>}
+            <label className="field">
+              Model
+              <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
+                {models.length === 0 && <option value="">No models found for this key</option>}
+                {models.map((m) => (
+                  <option key={m.model} value={m.model}>
+                    {m.recommended ? '★ ' : ''}
+                    {m.label}
+                    {m.note ? ` · ${m.note}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className="btn sm ghost" style={{ alignSelf: 'flex-start' }} onClick={() => openAccount(user ? 'keys' : 'signin')}>
+              {user ? '🔑 Manage my API keys' : '🔑 Sign in to use your own keys'}
+            </button>
+          </>
+        ))}
 
       <label className="field">
         Personality
@@ -192,7 +183,7 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
       </label>
       <button
         className="btn block"
-        disabled={disabled || busy || (kind === 'llm' && (configured.length === 0 || !model))}
+        disabled={disabled || busy || (kind === 'llm' && (usable.length === 0 || !model))}
         onClick={add}
       >
         {busy ? 'Adding…' : `Add ${kind === 'bot' ? 'bot' : 'LLM player'}`}
@@ -245,9 +236,12 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
     <div className="page">
       <div className="topbar">
         <div className="brand">🔨 Company Auction</div>
-        <button className="btn sm ghost" onClick={onLeave}>
-          Leave
-        </button>
+        <div className="row">
+          <AccountButton />
+          <button className="btn sm ghost" onClick={onLeave}>
+            Leave
+          </button>
+        </div>
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
@@ -299,6 +293,8 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
                       <div className="tiny muted">
                         {PERSONAS[p.ai.persona].label}
                         {p.ai.provider ? ` · ${p.ai.provider}` : ''}
+                        {p.ai.keySource === 'account' && p.ai.keyOwner ? ` · ${p.ai.keyOwner}’s key` : ''}
+                        {p.ai.keySource === 'server' ? ' · server key' : ''}
                       </div>
                     )}
                   </div>

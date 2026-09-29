@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { AccountButton, useAuth } from '../auth.tsx';
 import { loadName, saveName } from '../socket.ts';
 
 const FEATURES = [
@@ -7,12 +8,16 @@ const FEATURES = [
   { icon: '🕵️', title: 'Private intel', text: 'Secret tips only you see. Trailing players get extra help.' },
   { icon: '🧩', title: 'Sectors & combos', text: 'Build empires: Ad Duopoly, Chip Supply Chain, Musk Empire and 70+ more.' },
   { icon: '📰', title: 'Market events', text: 'Rate hikes, oil shocks, AI booms. Real-world economics move profits.' },
-  { icon: '🤖', title: 'Play vs AI', text: 'Fill seats with open-source LLMs from free providers and watch them reason.' },
+  { icon: '🤖', title: 'Play vs AI', text: 'Save a free API key once, then add LLM players to any game and watch them reason.' },
 ];
 
 export function Home({ enter }: { enter: (event: 'room:create' | 'room:join', payload: unknown) => Promise<string | null> }) {
   const params = new URLSearchParams(window.location.search);
+  const { user } = useAuth();
   const [name, setName] = useState(loadName);
+  useEffect(() => {
+    if (user && !name.trim()) setName(user.username);
+  }, [user, name]);
   const [code, setCode] = useState((params.get('room') ?? '').toUpperCase());
   const [busy, setBusy] = useState<'create' | 'join' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +47,9 @@ export function Home({ enter }: { enter: (event: 'room:create' | 'room:join', pa
 
   return (
     <div className="home">
+      <div className="home-top">
+        <AccountButton />
+      </div>
       <div className="hero">
         <div className="logo">🔨</div>
         <h1>Company Auction</h1>

@@ -5,7 +5,7 @@ import { PERSONAS, WIN_CONDITION_LABEL, type Persona } from '../../shared/types.
 import type { EnginePlayer, Game } from '../game/engine.ts';
 import { appraise } from './appraise.ts';
 import type { AiDecision } from './bot.ts';
-import { providerById } from './models.ts';
+import { providerById, type Credentials } from './models.ts';
 
 const WIN_EXPLAIN = {
   netWorth: 'Highest final cash + end-of-game company value wins. Every dollar overpaid is a dollar lost.',
@@ -163,14 +163,14 @@ export async function llmDecision(opts: {
   player: EnginePlayer;
   companyId: string;
   persona: Persona;
-  provider: string;
+  credentials: Credentials;
   model: string;
   timeoutMs: number;
 }): Promise<AiDecision> {
-  const provider = providerById(opts.provider);
-  const base = provider?.baseUrl();
-  const key = provider?.apiKey();
-  if (!provider || !base || !key) throw new LlmError(`${opts.provider} is not configured`);
+  const provider = providerById(opts.credentials.provider);
+  if (!provider) throw new LlmError(`unknown provider ${opts.credentials.provider}`);
+  const base = opts.credentials.baseUrl;
+  const key = opts.credentials.apiKey;
 
   const { system, user } = buildPrompt(opts.game, opts.player, opts.companyId, opts.persona);
   const res = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {

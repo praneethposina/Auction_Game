@@ -19,6 +19,8 @@ function setup(overrides: Partial<GameSettings> = {}) {
   return { game, clock: () => clock, setClock: (t: number) => (clock = t) };
 }
 
+const creds = () => ({ provider: 'groq', baseUrl: 'http://fake', apiKey: 'k', source: 'account' as const });
+
 const flush = async () => {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 };
@@ -79,6 +81,7 @@ describe('AiDirector', () => {
     let calls = 0;
     const director = new AiDirector(game, clock, 1, {
       botDelay: false,
+      credentialsFor: creds,
       llm: async () => {
         calls++;
         throw new Error('rate limited');
@@ -104,6 +107,7 @@ describe('AiDirector', () => {
     const { game, clock, setClock } = setup({ auctionMode: 'open' });
     const director = new AiDirector(game, clock, 2, {
       botDelay: false,
+      credentialsFor: creds,
       llm: async () => ({ maxBid: 150, reason: 'fair value', source: 'llm' }),
     });
     setClock(100000);
