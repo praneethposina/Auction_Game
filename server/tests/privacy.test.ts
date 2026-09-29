@@ -49,6 +49,12 @@ describe('AI reasoning never leaks private information during the game', () => {
     expect(publicSafeReason('With $3,000M in cash I can afford it.', game, p)).toBeNull();
     expect(publicSafeReason('It turns over less than $300M, so modest bid.', game, p)).toBeNull();
     expect(publicSafeReason('My other company makes $187M a round.', game, p)).toBeNull();
+    expect(publicSafeReason('Intel says this one tops the pool.', game, p)).toBeNull();
+    expect(publicSafeReason('Per my tips, a solid earner.', game, p)).toBeNull();
+    // The chip company is not a leak.
+    expect(publicSafeReason('Intel completes GPU Wars with my NVIDIA; worth a strong bid.', game, p)).toBe(
+      'Intel completes GPU Wars with my NVIDIA; worth a strong bid.',
+    );
     expect(publicSafeReason('Anchor for Streaming Giants; 10 payouts left make it worth a strong bid.', game, p)).toBe(
       'Anchor for Streaming Giants; 10 payouts left make it worth a strong bid.',
     );

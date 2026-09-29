@@ -279,7 +279,12 @@ export function parseDecision(
  */
 export function publicSafeReason(reason: string, game: Game, player: EnginePlayer): string | null {
   const text = reason.toLowerCase();
-  if (/\b(intel|insider|tip|tips|tipped|private|secret|analyst|heat|leak|leaked)\b/.test(text)) return null;
+  // "Intel" the chip company is fine; "my intel says…" is not. Lowercase "intel" is almost
+  // always the tip, capitalised it's usually the company, so check the original casing too.
+  if (/\bintel\b/.test(reason)) return null;
+  if (/\b(my|our|the|private|secret|insider|analyst'?s?)\s+(intel|tips?|info|information|intelligence)\b/.test(text)) return null;
+  if (/\bintel\s+(says|said|suggests|shows|indicates|puts|tells|told|reveals|confirms|hints)\b/.test(text)) return null;
+  if (/\b(insider|tipped|tip-off|a tip|private info|secret info|analyst|heat|leak|leaked)\b/.test(text)) return null;
   if (/\b(hot|cold|warm|cool|ice|icy|frozen|temperature)\b/.test(text)) return null;
   if (/next round'?s? (news|headline|event)|upcoming (news|headline)/.test(text)) return null;
   const numbers = [...text.matchAll(/\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(b|bn|billion|m|mn|million)?\b/g)].map((m) => {
