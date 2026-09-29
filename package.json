@@ -12,10 +12,11 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
     "build": "vite build",
-    "start": "tsx server/index.ts",
+    "start": "node --import tsx server/index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "simulate": "tsx scripts/simulate.ts"
+    "simulate": "tsx scripts/simulate.ts",
+    "prompt-size": "tsx scripts/prompt-size.ts"
   },
   "dependencies": {
     "express": "^5.2.1",

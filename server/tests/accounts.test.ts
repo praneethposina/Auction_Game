@@ -41,7 +41,8 @@ function storeSuite(name: string, open: () => Promise<Store>) {
     beforeAll(async () => {
       store = await open();
       if (store.db.kind === 'postgres') {
-        for (const t of ['users', 'sessions', 'api_keys', 'meta']) await store.db.run(`DELETE FROM ${t}`);
+        for (const t of ['users', 'sessions', 'api_keys', 'meta', 'games', 'game_members', 'game_logs', 'room_snapshots'])
+          await store.db.run(`DELETE FROM ${t}`);
       }
     });
     afterAll(async () => store.db.close());
@@ -76,6 +77,52 @@ function storeSuite(name: string, open: () => Promise<Store>) {
       expect(await store.getKey('u1', 'groq')).toBe('sealed-2');
       expect(await store.deleteKey('u1', 'groq')).toBe(true);
       expect(await store.getKey('u1', 'groq')).toBeNull();
+    });
+
+    it('records games, members and their logs', async () => {
+      await store.createGame({ id: 'g1', roomCode: 'ABCDE', startedAt: 100, info: '{"players":[],"settings":{}}' });
+      await store.createGame({ id: 'g0', roomCode: 'OLD', startedAt: 1, info: '{}' });
+      await store.addGameMember('g1', 'u1');
+      await store.addGameMember('g1', 'u1');
+      await store.addGameMember('g0', 'u1');
+      const entries = Array.from({ length: 450 }, (_, i) => ({ seq: i + 1, at: 100 + i, kind: 'lot', msg: `m${i}` }));
+      await store.appendGameLogs('g1', entries);
+      await store.appendGameLogs('g1', entries.slice(0, 3)); // re-sent after a failed flush: ignored
+      const logs = await store.gameLogs('g1');
+      expect(logs.length).toBe(450);
+      expect(JSON.parse(logs[449]).msg).toBe('m449');
+      expect((await store.userGames('u1', 10)).map((g) => g.id)).toEqual(['g1', 'g0']);
+      await store.endGame('g1', 'finished', 500);
+      await store.endGame('g1', 'ended', 600); // first ending wins
+      expect(await store.getGame('g1')).toMatchObject({ status: 'finished', endedAt: 500, roomCode: 'ABCDE' });
+      await store.purgeGames(50);
+      expect(await store.getGame('g0')).toBeNull();
+      expect((await store.userGames('u1', 10)).map((g) => g.id)).toEqual(['g1']);
+    });
+
+    it('hands rooms over between processes', async () => {
+      expect(await store.reserveRoom('ROOM1', 'a', 1)).toBe(true);
+      expect(await store.reserveRoom('ROOM1', 'b', 1)).toBe(false);
+      // Nothing saved yet: nobody can claim an empty reservation.
+      expect(await store.claimRoom('ROOM1', 'b', 2, 0)).toBe(false);
+      expect(await store.saveRoom('ROOM1', 'a', 'a', 10, '{"v":1}')).toBe(true);
+      expect(await store.saveRoom('ROOM1', 'b', 'b', 11, '{"v":2}')).toBe(false); // not b's room
+      // Owner alive: no claim. Owner silent too long: claim works.
+      expect(await store.claimRoom('ROOM1', 'b', 12, 5)).toBe(false);
+      await store.heartbeatRooms('a', 20);
+      expect(await store.claimRoom('ROOM1', 'b', 21, 15)).toBe(false);
+      // Graceful release.
+      expect(await store.saveRoom('ROOM1', null, 'a', 30, '{"v":3}')).toBe(true);
+      expect(await store.claimRoom('ROOM1', 'b', 31, 0)).toBe(true);
+      expect(await store.loadRoom('ROOM1')).toMatchObject({ owner: 'b', data: '{"v":3}', savedAt: 30 });
+      expect(await store.saveRoom('ROOM1', 'a', 'a', 40, '{"v":4}')).toBe(false); // a lost it
+      // Saving a room that was never reserved inserts it.
+      expect(await store.saveRoom('ROOM2', 'a', 'a', 50, '{"v":1}')).toBe(true);
+      await store.deleteRoom('ROOM1', 'a');
+      expect(await store.loadRoom('ROOM1')).not.toBeNull();
+      await store.deleteRoom('ROOM1', 'b');
+      expect(await store.loadRoom('ROOM1')).toBeNull();
+      expect(await store.purgeRooms(60)).toBe(1);
     });
 
     it('keeps the first meta value', async () => {

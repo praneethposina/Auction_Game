@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { SavedKey } from '../../../shared/types.ts';
+import type { GameInfo, SavedKey } from '../../../shared/types.ts';
 import { api, type KeyCheck, type ProviderInfo } from '../api.ts';
 import { useAuth } from '../auth.tsx';
+import { GameLogModal } from './GameLogModal.tsx';
 
 function SignInForm({ initial }: { initial: 'signin' | 'signup' }) {
   const { signIn } = useAuth();
@@ -192,6 +193,50 @@ function KeysManager() {
           <KeyRow key={p.id} provider={p} saved={keys.find((k) => k.provider === p.id)} onChanged={keysChanged} />
         ))}
       </div>
+      <div className="divider" />
+      <RecentGames />
+    </div>
+  );
+}
+
+/** Games this account played in, each with its debug log. */
+function RecentGames() {
+  const [games, setGames] = useState<GameInfo[] | null>(null);
+  const [logFor, setLogFor] = useState<string | null>(null);
+  useEffect(() => {
+    void api.myGames().then((r) => setGames(r.ok ? r.data.games : []));
+  }, []);
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <h3 style={{ marginBottom: 0 }}>Recent games</h3>
+      <div className="hint">Logs show every lot, AI decision and LLM request with timings and errors. Kept for 30 days.</div>
+      {games === null ? (
+        <div className="muted small">Loading…</div>
+      ) : games.length === 0 ? (
+        <div className="empty">No games yet. Games you play while signed in show up here.</div>
+      ) : (
+        <div className="list">
+          {games.map((g) => {
+            const llms = g.players.filter((p) => p.kind === 'llm').length;
+            return (
+              <div key={g.id} className="item">
+                <div className="grow">
+                  <div className="small" style={{ fontWeight: 600 }}>
+                    {new Date(g.startedAt).toLocaleString()} · room {g.roomCode}
+                  </div>
+                  <div className="tiny muted">
+                    {g.players.length} players{llms ? ` (${llms} LLM)` : ''} · {g.status === 'playing' ? 'in progress' : g.status}
+                  </div>
+                </div>
+                <button className="btn sm ghost" onClick={() => setLogFor(g.id)}>
+                  📜 Log
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {logFor && <GameLogModal gameId={logFor} onClose={() => setLogFor(null)} />}
     </div>
   );
 }

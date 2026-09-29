@@ -10,10 +10,13 @@ import {
   type PublicAiSpec,
   type RoomView,
 } from '../shared/types.ts';
-import { AiDirector } from './ai/director.ts';
+import { COMPANY_BY_ID } from '../shared/data/companies.ts';
+import { money } from '../shared/economy.ts';
+import { AiDirector, type DirectorSnapshot } from './ai/director.ts';
 import { providerById, type Credentials } from './ai/models.ts';
-import { Game } from './game/engine.ts';
+import { Game, type GameEvent, type GameSnapshot } from './game/engine.ts';
 import { randomSeed } from './game/rng.ts';
+import { GameLog, type LogWriter } from './gamelog.ts';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const LOBBY_DROP_MS = 2 * 60 * 1000;
@@ -47,6 +50,34 @@ export interface RoomPlayer extends Omit<LobbyPlayer, 'ai'> {
   token: string;
   sockets: Set<string>;
   disconnectedAt: number | null;
+}
+
+/** Hooks into the rest of the server (database), all optional so rooms work standalone in tests. */
+export interface RoomServices {
+  /** Persist game log entries. Without it logs only go to the console. */
+  writeLogs?: LogWriter | null;
+  /** Don't print log lines to the console (tests, simulations). */
+  quietLogs?: boolean;
+  gameStarted?: (room: Room) => void;
+  gameEnded?: (room: Room, status: 'finished' | 'ended') => void;
+}
+
+/** A room as plain JSON, to survive a server restart. API keys are sealed (encrypted). */
+export interface RoomSnapshot {
+  v: 1;
+  code: string;
+  hostId: string;
+  players: (Omit<RoomPlayer, 'sockets'> & { sockets?: undefined })[];
+  settings: GameSettings;
+  status: RoomView['status'];
+  gameId: string | null;
+  logSeq: number;
+  gameStartedAt: number | null;
+  game: GameSnapshot | null;
+  director: DirectorSnapshot | null;
+  credentials: string | null;
+  accounts: [string, string][];
+  savedAt: number;
 }
 
 type Result<T = undefined> = { ok: true; data?: T } | { ok: false; error: string };
@@ -105,20 +136,41 @@ export class Room {
   settings: GameSettings = { ...DEFAULT_SETTINGS };
   status: RoomView['status'] = 'lobby';
   game: Game | null = null;
+  gameId: string | null = null;
+  gameStartedAt: number | null = null;
+  log: GameLog | null = null;
   lastActivity = Date.now();
+  /** Signed-in account behind each human seat (player id → user id), for "my games". */
+  readonly accounts = new Map<string, string>();
   private director: AiDirector | null = null;
   /** Keys powering LLM players. Server memory only, never sent to clients. */
   private readonly aiCredentials = new Map<string, Credentials>();
   private sentVersion = -1;
   private dirty = true;
+  /** Bumped on every change, so the saver knows when a snapshot is stale. */
+  changes = 0;
+  private unsubscribeLog: (() => void) | null = null;
 
-  constructor(code: string) {
+  constructor(
+    code: string,
+    private readonly services: RoomServices = {},
+  ) {
     this.code = code;
   }
 
   touch() {
     this.dirty = true;
+    this.changes++;
     this.lastActivity = Date.now();
+  }
+
+  /** Changes whenever anything worth saving changes. */
+  stateKey(): string {
+    return `${this.changes}:${this.game?.version ?? -1}`;
+  }
+
+  private name(playerId: string) {
+    return this.player(playerId)?.name ?? playerId;
   }
 
   humanCount() {
@@ -232,6 +284,7 @@ export class Room {
   leave(playerId: string) {
     if (this.status !== 'lobby') {
       // Mid-game the seat stays (the game keeps their companies), but host duties move on.
+      if (this.status === 'playing') this.log?.add('player', 'info', `${this.name(playerId)} left the game`, { playerId });
       this.setConnected(playerId, false);
       if (this.hostId === playerId) this.passHost(playerId);
       return;
@@ -249,6 +302,7 @@ export class Room {
     const next = humans.find((p) => p.connected) ?? humans[0];
     if (!next) return;
     this.hostId = next.id;
+    if (this.status === 'playing') this.log?.add('player', 'info', `${next.name} is now the host`, { playerId: next.id });
     for (const p of this.players) p.isHost = p.id === this.hostId;
     if (this.game) for (const p of this.game.players) p.isHost = p.id === this.hostId;
     this.game?.touchView();
@@ -278,12 +332,107 @@ export class Room {
       now,
     });
     for (const p of this.players) this.game.setConnected(p.id, p.connected);
-    this.director = new AiDirector(this.game, () => Date.now(), randomSeed(), {
-      credentialsFor: (id) => this.aiCredentials.get(id),
+    this.gameId = randomBytes(16).toString('base64url');
+    this.gameStartedAt = Date.now();
+    this.log = new GameLog(this.gameId, this.code, this.services.writeLogs ?? null, { quiet: this.services.quietLogs });
+    this.log.add('game', 'info', `Game started: ${this.players.length} players, ${this.game.companies.length} companies, ${this.game.totalRounds} rounds`, {
+      data: {
+        settings: this.settings,
+        players: this.players.map((p) => ({
+          name: p.name,
+          kind: p.kind,
+          ...(p.ai ? { persona: p.ai.persona, provider: p.ai.provider, model: p.ai.model, keySource: p.ai.keySource } : {}),
+        })),
+      },
     });
+    this.wireGame();
     this.status = 'playing';
     this.touch();
+    this.services.gameStarted?.(this);
     return { ok: true };
+  }
+
+  /** Director + game-event logging for the current game (new or restored). */
+  private wireGame(restore?: DirectorSnapshot) {
+    const game = this.game!;
+    this.director = new AiDirector(game, () => Date.now(), randomSeed(), {
+      credentialsFor: (id) => this.aiCredentials.get(id),
+      log: this.log,
+      restore,
+    });
+    this.unsubscribeLog?.();
+    this.unsubscribeLog = game.on((e) => this.logGameEvent(e));
+  }
+
+  private logGameEvent(e: GameEvent) {
+    const game = this.game;
+    const log = this.log;
+    if (!game || !log) return;
+    if (e.type === 'auctionStart') {
+      const c = COMPANY_BY_ID[e.companyId];
+      log.add('lot', 'info', `Round ${game.round}, lot ${game.slotInRound()}/${game.slotsInRound()}: ${c.name} (${c.tier})`, {
+        data: { round: game.round, company: c.name, sector: c.sector, tier: c.tier },
+      });
+    } else if (e.type === 'auctionEnd') {
+      const c = game.company(e.companyId)!;
+      const secs = ((Date.now() - e.startedAt) / 1000).toFixed(1);
+      const thinking = e.stillThinking.map((id) => this.name(id));
+      const msg =
+        e.winnerId && e.price !== null
+          ? `${c.def.name} sold to ${this.name(e.winnerId)} for ${money(e.price)} (${e.bids} bid${e.bids === 1 ? '' : 's'}, ${secs}s)`
+          : `${c.def.name}: no bids, withdrawn (${secs}s)`;
+      log.add('lot', thinking.length ? 'warn' : 'info', thinking.length ? `${msg}. Closed while ${thinking.join(', ')} still thinking` : msg, {
+        data: {
+          round: game.round,
+          company: c.def.name,
+          winner: e.winnerId ? this.name(e.winnerId) : null,
+          price: e.price,
+          bids: e.bids,
+          seconds: Number(secs),
+          ...(thinking.length ? { stillThinking: thinking } : {}),
+        },
+        secret: { turnover: c.turnover },
+      });
+    } else if (e.type === 'roundEnd') {
+      log.add('round', 'info', `Round ${e.round} payouts`, {
+        secret: { payouts: Object.fromEntries(game.players.map((p) => [p.name, p.payouts.at(-1)?.total ?? 0])) },
+      });
+    } else if (e.type === 'finished') {
+      const standings = game.results?.standings ?? [];
+      const top = standings[0];
+      log.add('game', 'info', top ? `Game over: ${this.name(top.playerId)} wins` : 'Game over', {
+        data: {
+          standings: standings.map((st) => ({ name: this.name(st.playerId), rank: st.rank, netWorth: Math.round(st.netWorth), purse: st.purse })),
+        },
+      });
+      void log.flush();
+      this.services.gameEnded?.(this, 'finished');
+    }
+  }
+
+  // ── Host controls ──
+
+  pause(byId: string, paused: boolean, now: number): Result {
+    if (byId !== this.hostId) return fail('Only the host can pause.');
+    if (!this.game) return fail('No game.');
+    const wasPaused = this.game.paused;
+    const r = paused ? this.game.pause(now) : this.game.resume(now);
+    if (r.ok && wasPaused !== paused) this.log?.add('game', 'info', `${this.name(byId)} ${paused ? 'paused' : 'resumed'} the game`);
+    return r;
+  }
+
+  endGame(byId: string): Result {
+    if (byId !== this.hostId) return fail('Only the host can end the game.');
+    if (!this.game) return fail('No game.');
+    const round = this.game.round;
+    const r = this.game.endEarly();
+    if (r.ok) this.log?.add('game', 'info', `${this.name(byId)} ended the game early in round ${round}`);
+    return r;
+  }
+
+  skip(byId: string, now: number): Result {
+    if (byId !== this.hostId) return fail('Only the host can skip.');
+    return this.game?.skip(now) ?? fail('No game.');
   }
 
   rematch(byId: string): Result {
@@ -291,7 +440,13 @@ export class Room {
     if (this.status !== 'finished') return fail('The game is not over yet.');
     this.director?.dispose();
     this.director = null;
+    this.unsubscribeLog?.();
+    this.unsubscribeLog = null;
+    void this.log?.flush();
+    this.log = null;
     this.game = null;
+    this.gameId = null;
+    this.gameStartedAt = null;
     this.status = 'lobby';
     this.touch();
     return { ok: true };
@@ -314,6 +469,9 @@ export class Room {
   private setConnected(playerId: string, connected: boolean) {
     const p = this.player(playerId);
     if (!p || p.kind !== 'human') return;
+    if (p.connected !== connected && this.status === 'playing') {
+      this.log?.add('player', 'info', `${p.name} ${connected ? 'connected' : 'disconnected'}`, { playerId });
+    }
     p.connected = connected;
     p.disconnectedAt = connected ? null : Date.now();
     this.game?.setConnected(playerId, connected);
@@ -351,8 +509,89 @@ export class Room {
     return this.humanCount() === 0 || (!anyoneHere && now - this.lastActivity > ROOM_IDLE_MS);
   }
 
+  /** The room is closing for good (everyone left or it sat idle). */
   dispose() {
+    this.stop();
+    if (this.status === 'playing' && this.log) {
+      this.log.add('game', 'warn', 'Room closed before the game finished (everyone left or went idle)');
+      this.services.gameEnded?.(this, 'ended');
+    }
+    void this.log?.flush();
+  }
+
+  /** Stop AI activity (on dispose, or before the server hands the room to a new process). */
+  stop() {
     this.director?.dispose();
+    this.director = null;
+    this.unsubscribeLog?.();
+    this.unsubscribeLog = null;
+  }
+
+  snapshot(seal: (plain: string) => string, now: number): RoomSnapshot {
+    return {
+      v: 1,
+      code: this.code,
+      hostId: this.hostId,
+      players: this.players.map(({ sockets: _sockets, ...p }) => ({ ...p })),
+      settings: this.settings,
+      status: this.status,
+      gameId: this.gameId,
+      logSeq: this.log?.lastSeq ?? 0,
+      gameStartedAt: this.gameStartedAt,
+      game: this.game?.snapshot() ?? null,
+      director: this.director?.snapshot() ?? null,
+      credentials: this.aiCredentials.size ? seal(JSON.stringify([...this.aiCredentials])) : null,
+      accounts: [...this.accounts],
+      savedAt: now,
+    };
+  }
+
+  /**
+   * Rebuild a room saved by another server process. Everyone starts disconnected and rejoins
+   * with their seat token; timers resume where they stopped; AI players still thinking are asked again.
+   */
+  static restore(
+    snap: RoomSnapshot,
+    opts: { services?: RoomServices; unseal: (sealed: string) => string | null; now: number },
+  ): Room {
+    const room = new Room(snap.code, opts.services);
+    room.hostId = snap.hostId;
+    room.settings = snap.settings;
+    room.status = snap.status;
+    room.gameId = snap.gameId;
+    room.gameStartedAt = snap.gameStartedAt;
+    for (const [pid, uid] of snap.accounts) room.accounts.set(pid, uid);
+    room.players = snap.players.map((p) => ({
+      ...p,
+      sockets: new Set<string>(),
+      connected: p.kind !== 'human',
+      disconnectedAt: p.kind === 'human' ? opts.now : null,
+    }));
+    if (snap.credentials) {
+      const plain = opts.unseal(snap.credentials);
+      if (plain) for (const [pid, cred] of JSON.parse(plain) as [string, Credentials][]) room.aiCredentials.set(pid, cred);
+    }
+    if (snap.game && snap.gameId) {
+      room.game = new Game({ snapshot: snap.game, frozenAt: snap.savedAt, now: opts.now });
+      for (const p of room.players) if (p.kind === 'human') room.game.setConnected(p.id, false);
+      room.log = new GameLog(snap.gameId, snap.code, opts.services?.writeLogs ?? null, {
+        seq: snap.logSeq,
+        quiet: opts.services?.quietLogs,
+      });
+      const gap = ((opts.now - snap.savedAt) / 1000).toFixed(1);
+      room.log.add('server', 'info', `Game restored after a server restart; the clock was stopped for ${gap}s`, {
+        data: { gapMs: opts.now - snap.savedAt },
+      });
+      if (snap.credentials && room.aiCredentials.size === 0) {
+        room.log.add('server', 'error', 'Could not unlock the saved AI keys (APP_SECRET changed?); LLM players use the backup brain');
+      }
+      if (room.status === 'playing') {
+        room.wireGame(snap.director ?? undefined);
+        room.director!.resumeAuction();
+      }
+    }
+    room.touch();
+    return room;
   }
 
   viewFor(playerId: string, now: number): RoomView {
@@ -370,6 +609,7 @@ export class Room {
       players: this.players.map(({ id, name, kind, isHost, connected, ai }) => redact({ id, name, kind, isHost, connected, ai })),
       settings: this.settings,
       game,
+      gameId: this.gameId,
     };
   }
 }
@@ -377,14 +617,30 @@ export class Room {
 export class RoomRegistry {
   private readonly rooms = new Map<string, Room>();
 
+  constructor(
+    readonly services: RoomServices = {},
+    private readonly onDelete?: (room: Room) => void,
+  ) {}
+
   create(): Room {
     let code = '';
     do {
       code = Array.from(randomBytes(5), (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
     } while (this.rooms.has(code));
-    const room = new Room(code);
+    const room = new Room(code, this.services);
     this.rooms.set(code, room);
     return room;
+  }
+
+  /** Put a restored room in place. */
+  add(room: Room) {
+    this.rooms.set(room.code, room);
+  }
+
+  /** Drop a room from this process without ending it (another process owns it now). */
+  forget(code: string) {
+    this.rooms.get(code)?.stop();
+    this.rooms.delete(code);
   }
 
   get(code: unknown): Room | undefined {
@@ -397,7 +653,10 @@ export class RoomRegistry {
   }
 
   delete(code: string) {
-    this.rooms.get(code)?.dispose();
+    const room = this.rooms.get(code);
+    if (!room) return;
+    room.dispose();
     this.rooms.delete(code);
+    this.onDelete?.(room);
   }
 }

@@ -1,9 +1,16 @@
 import type { Game, GameEvent } from '../game/engine.ts';
 import { TIMING } from '../game/engine.ts';
 import { createRng, type Rng } from '../game/rng.ts';
+import type { GameLog } from '../gamelog.ts';
 import { botDecision, type AiDecision } from './bot.ts';
-import { LlmError, llmDecision } from './llm.ts';
+import { LlmError, llmDecision, newTrace, type LlmTrace } from './llm.ts';
 import type { Credentials } from './models.ts';
+
+/** What the director needs to carry across a server restart. */
+export interface DirectorSnapshot {
+  rng: number;
+  benched: [string, string][];
+}
 
 /**
  * Drives the AI players of one game.
@@ -17,13 +24,18 @@ export class AiDirector {
   private readonly decisions = new Map<string, AiDecision>();
   private readonly nextActAt = new Map<string, number>();
   private seq = 0;
+  /** When the current lot closed (wall clock), to tell how late a slow answer was. */
+  private closedAt = new Map<number, number>();
   /** AI players whose provider can't serve them any more (no credits, bad key), with the reason. */
   private readonly benched = new Map<string, string>();
+  /** LLM players whose (fixed) system prompt is already in the log. */
+  private readonly loggedSystem = new Set<string>();
   private readonly unsubscribe: () => void;
 
   private readonly llm: typeof llmDecision;
   private readonly botDelay: boolean;
   private readonly credentialsFor: (playerId: string) => Credentials | undefined;
+  private readonly log: GameLog | null;
 
   constructor(
     private readonly game: Game,
@@ -33,12 +45,16 @@ export class AiDirector {
       llm?: typeof llmDecision;
       botDelay?: boolean;
       credentialsFor?: (playerId: string) => Credentials | undefined;
+      log?: GameLog | null;
+      restore?: DirectorSnapshot;
     } = {},
   ) {
     this.llm = opts.llm ?? llmDecision;
     this.botDelay = opts.botDelay ?? true;
     this.credentialsFor = opts.credentialsFor ?? (() => undefined);
-    this.rng = createRng(seed);
+    this.log = opts.log ?? null;
+    this.rng = createRng(opts.restore ? opts.restore.rng : seed);
+    for (const [id, why] of opts.restore?.benched ?? []) this.benched.set(id, why);
     this.unsubscribe = game.on((e) => this.onEvent(e));
   }
 
@@ -47,47 +63,111 @@ export class AiDirector {
     this.unsubscribe();
   }
 
+  snapshot(): DirectorSnapshot {
+    return { rng: this.rng.state(), benched: [...this.benched] };
+  }
+
+  /**
+   * After a restart mid-auction: rebuild the AI decisions already made for the lot on the block
+   * (they are in the game's AI thoughts) and ask again for the ones that were still thinking.
+   */
+  resumeAuction() {
+    const a = this.game.auction;
+    if (!a || this.game.phase !== 'auction') return;
+    const seq = ++this.seq;
+    const now = this.now();
+    const pending = [];
+    for (const p of this.aiPlayers()) {
+      const thought = this.game.aiThoughts.findLast((t) => t.playerId === p.id && t.companyId === a.companyId && t.round === this.game.round);
+      if (!thought) {
+        pending.push(p);
+        continue;
+      }
+      if (this.game.settings.auctionMode === 'open') {
+        this.decisions.set(p.id, { maxBid: thought.maxBid, reason: thought.reason, publicReason: thought.publicReason, source: thought.source });
+        this.nextActAt.set(p.id, now + 500 + this.rng.next() * 900);
+      } else if (!a.sealed.has(p.id)) {
+        this.game.submitSealed(p.id, thought.maxBid >= this.game.minOpeningBid() ? thought.maxBid : null, now, true);
+      }
+    }
+    this.decide(seq, a.companyId, pending);
+  }
+
   private aiPlayers() {
     return this.game.players.filter((p) => p.kind !== 'human');
   }
 
   private onEvent(e: GameEvent) {
-    if (e.type === 'auctionStart') this.startAuction(e.companyId);
+    if (e.type === 'auctionStart') this.decide(++this.seq, e.companyId, this.aiPlayers());
     else if (e.type === 'bid') this.onBid(e.playerId);
     else if (e.type === 'auctionEnd') {
+      this.closedAt.set(this.seq, Date.now());
+      if (this.closedAt.size > 4) this.closedAt.delete(this.closedAt.keys().next().value!);
       this.seq++;
       this.decisions.clear();
       this.nextActAt.clear();
     }
   }
 
-  private startAuction(companyId: string) {
-    const seq = ++this.seq;
+  private decide(seq: number, companyId: string, players: Game['players']) {
     const now = this.now();
     // Long bid timers shouldn't mean waiting minutes on a stuck LLM request.
     const timeoutMs = Math.min(45000, this.game.settings.bidSeconds * 1000 + TIMING.aiGraceMs - 1500);
-    for (const p of this.aiPlayers()) {
+    const round = this.game.round;
+    const lotName = this.game.company(companyId)?.def.name ?? companyId;
+    for (const p of players) {
       this.game.setAiPending(p.id, true, now);
       const persona = p.ai?.persona ?? 'balanced';
-      const decide = async (): Promise<AiDecision> => {
+      const label = p.ai?.modelLabel ?? p.ai?.model ?? p.name;
+      const started = Date.now();
+      const base = { player: p.name, lot: lotName, round };
+      const withNote = (fb: AiDecision, note: string): AiDecision => ({
+        ...fb,
+        reason: `${note} ${fb.reason}`,
+        publicReason: `${note} ${fb.publicReason}`,
+      });
+
+      const decide = async (): Promise<{ d: AiDecision; log?: (late: { late: boolean; afterCloseMs?: number }) => void }> => {
         const credentials = this.credentialsFor(p.id);
         const benched = this.benched.get(p.id);
         if (p.kind === 'llm' && benched) {
           const fb = botDecision(this.game, p, companyId, persona, this.rng, 'fallback');
-          const note = `[${benched}; the backup brain is playing for it]`;
-          return { ...fb, reason: `${note} ${fb.reason}`, publicReason: `${note} ${fb.publicReason}` };
+          const d = withNote(fb, `[${benched}; the backup brain is playing for it]`);
+          return {
+            d,
+            log: () =>
+              this.log?.add('llm', 'warn', `${p.name}: not called (${benched}); backup brain bid`, {
+                playerId: p.id,
+                data: { ...base, provider: p.ai?.provider, model: p.ai?.model, outcome: 'benched' },
+                secret: { maxBid: d.maxBid, reason: d.reason },
+              }),
+          };
+        }
+        if (p.kind === 'llm' && p.ai?.model && !credentials) {
+          this.log?.add('llm', 'error', `${p.name}: no API key available on this server; backup brain bid`, {
+            playerId: p.id,
+            data: { ...base, provider: p.ai.provider, model: p.ai.model, outcome: 'no_key' },
+          });
         }
         if (p.kind === 'llm' && p.ai?.model && credentials) {
-          try {
-            return await this.llm({
-              game: this.game,
-              player: p,
-              companyId,
-              persona,
-              credentials,
-              model: p.ai.model,
+          const trace = newTrace();
+          const ai = p.ai;
+          const logCall = (outcome: string, d: AiDecision, why?: string) => (late: { late: boolean; afterCloseMs?: number }) =>
+            this.logLlm(p.id, trace, {
+              ...base,
+              ...late,
+              label,
+              provider: ai.provider,
+              model: ai.model,
+              outcome,
+              why,
+              ms: Date.now() - started,
               timeoutMs,
+              decision: d,
             });
+          try {
+            const d = await this.llm({ game: this.game, player: p, companyId, persona, credentials, model: ai.model!, timeoutMs, trace });
+            return { d, log: logCall('ok', d) };
           } catch (err) {
             const why =
               err instanceof Error
@@ -95,22 +175,104 @@ export class AiDirector {
                   ? 'took too long to answer'
                   : err.message
                 : 'failed';
+            const outcome = err instanceof LlmError ? err.code : err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'error';
             const fb = botDecision(this.game, p, companyId, persona, this.rng, 'fallback');
-            const label = p.ai.modelLabel ?? p.ai.model;
             if (err instanceof LlmError && err.fatal) {
               this.benched.set(p.id, `${label} ${why}`);
-              const note = `[${label} ${why}. It won't be called again this game; the backup brain plays for it]`;
-              return { ...fb, reason: `${note} ${fb.reason}`, publicReason: `${note} ${fb.publicReason}` };
+              const d = withNote(fb, `[${label} ${why}. It won't be called again this game; the backup brain plays for it]`);
+              return { d, log: logCall(outcome, d, why) };
             }
-            const note = `[${label} ${why}; the backup brain bid instead]`;
-            return { ...fb, reason: `${note} ${fb.reason}`, publicReason: `${note} ${fb.publicReason}` };
+            const d = withNote(fb, `[${label} ${why}; the backup brain bid instead]`);
+            return { d, log: logCall(outcome, d, why) };
           }
         }
         if (this.botDelay) await new Promise((r) => setTimeout(r, 250 + this.rng.next() * 900));
-        return botDecision(this.game, p, companyId, persona, this.rng);
+        const d = botDecision(this.game, p, companyId, persona, this.rng);
+        return {
+          d,
+          log: () =>
+            this.log?.add('bot', 'info', `${p.name} decided in ${Date.now() - started}ms`, {
+              playerId: p.id,
+              data: { ...base, persona, ms: Date.now() - started },
+              secret: { maxBid: d.maxBid, reason: d.reason },
+            }),
+        };
       };
-      void decide().then((d) => this.apply(seq, p.id, companyId, d));
+      void decide().then(({ d, log }) => {
+        const late = seq !== this.seq || this.game.auction?.companyId !== companyId;
+        const closed = this.closedAt.get(seq);
+        log?.({ late, afterCloseMs: late && closed ? Date.now() - closed : undefined });
+        this.apply(seq, p.id, companyId, d);
+      });
     }
+  }
+
+  private logLlm(
+    playerId: string,
+    trace: LlmTrace,
+    info: {
+      player: string;
+      lot: string;
+      round: number;
+      label: string;
+      provider?: string;
+      model?: string;
+      outcome: string;
+      why?: string;
+      ms: number;
+      timeoutMs: number;
+      late: boolean;
+      afterCloseMs?: number;
+      decision: AiDecision;
+    },
+  ) {
+    if (!this.log) return;
+    const { decision: d, label, why, ...rest } = info;
+    const sum = (k: 'promptTokens' | 'outputTokens') =>
+      trace.attempts.some((a) => a[k] !== undefined) ? trace.attempts.reduce((s, a) => s + (a[k] ?? 0), 0) : undefined;
+    const promptTokens = sum('promptTokens');
+    const outputTokens = sum('outputTokens');
+    const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+    const tokens = promptTokens !== undefined ? ` (${promptTokens}→${outputTokens ?? '?'} tokens)` : '';
+    const via =
+      trace.parsedFrom === 'reasoning'
+        ? ', read from its reasoning'
+        : trace.parsedFrom === 'short_think'
+          ? ', after a "think less" retry'
+          : trace.parsedFrom === 'repair'
+            ? ', after a JSON reminder'
+            : '';
+    const tries = trace.attempts.length > 1 ? ` after ${trace.attempts.length} requests` : '';
+    let msg =
+      info.outcome === 'ok'
+        ? `${info.player} (${label}) answered in ${secs(info.ms)}${tokens}${via}`
+        : `${info.player} (${label}) ${why}${tries} (${secs(info.ms)}); backup brain bid`;
+    if (info.late) msg += `. Arrived ${info.afterCloseMs !== undefined ? `${secs(info.afterCloseMs)} ` : ''}after the lot closed, so it was not used`;
+    if (trace.laneWaitMs > 1000) msg += `. Waited ${secs(trace.laneWaitMs)} for a free slot on the key`;
+    const level = info.outcome === 'ok' && !info.late ? 'info' : info.outcome === 'no_credits' || info.outcome === 'bad_key' ? 'error' : 'warn';
+    const first = !this.loggedSystem.has(playerId);
+    this.loggedSystem.add(playerId);
+    this.log.add('llm', level, msg, {
+      playerId,
+      data: {
+        ...rest,
+        laneWaitMs: trace.laneWaitMs,
+        promptChars: trace.system.length + trace.user.length,
+        promptTokens,
+        outputTokens,
+        parsedFrom: trace.parsedFrom,
+        attempts: trace.attempts,
+        ...(trace.withheldReason ? { reasonWithheld: true } : {}),
+      },
+      secret: {
+        maxBid: d.maxBid,
+        reason: d.reason,
+        ...(first ? { system: trace.system } : {}),
+        user: trace.user,
+        answer: trace.answer,
+        ...(trace.reasoningTail ? { reasoningTail: trace.reasoningTail } : {}),
+      },
+    });
   }
 
   private apply(seq: number, playerId: string, companyId: string, d: AiDecision) {

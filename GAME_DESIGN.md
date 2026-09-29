@@ -176,8 +176,16 @@ Ties are broken by net worth.
   personality wins some games, and which ones do best depends on the auction style and win
   condition.
 - **LLM players** run on the host's own saved API key (or a key shared by the server owner) and
-  get the same private view a human has (rules, cash, portfolio, intel, news,
-  opponents' holdings, relevant combos) and answer with `{"max_bid", "reason"}`.
+  answer with `{"max_bid", "reason"}`. The prompt is kept small:
+  - A **system message that stays the same all game**: persona, rules, win condition, auction
+    type and answer format. Providers that cache prompt prefixes can reuse it.
+  - A **compact JSON state** with only what bears on this lot: round, payouts left, cash, budget
+    per expected buy, the lot (tier range, own estimate from intel, running cost, news effect,
+    synergy if won, average value, loss chance), analyst notes, the intel tips about this lot,
+    its sector, related companies still to come or next round's news, own holdings, rivals'
+    company counts and holdings in the same sector, combos that include the lot, and related
+    companies still to come.
+  - About 400–500 tokens per call, down from about 950 before. `scripts/prompt-size.ts` measures it.
   - Each LLM is called **once per company**, which keeps free-tier usage low.
   - In open auctions the server then raises on its behalf, in human-like steps, up to that limit.
   - If a call fails or times out, the bot brain steps in and the reasoning is tagged "backup".

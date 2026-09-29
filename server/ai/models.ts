@@ -19,6 +19,8 @@ export interface ProviderDef {
   keyHint: string;
   /** Players can save their own key for this provider in their account. */
   userKeys: boolean;
+  /** Uses the key saved under another provider (same service, different model category). */
+  keyFrom?: string;
   baseUrl: () => string | undefined;
   serverKey: () => string | undefined;
   /** Curated, known-good models. */
@@ -27,7 +29,7 @@ export interface ProviderDef {
   extraBody?: (model: string) => Record<string, unknown>;
   extraHeaders?: Record<string, string>;
   /** Discover models at runtime via GET /models. */
-  discover?: { mode: 'openrouter-free' | 'all'; needsKey: boolean; mapId?: (id: string) => string };
+  discover?: { mode: 'openrouter-free' | 'openrouter-paid' | 'all'; needsKey: boolean; mapId?: (id: string) => string };
   /** Endpoint that answers 200 for a valid key. */
   validateUrl?: string;
 }
@@ -79,6 +81,24 @@ export const PROVIDERS: ProviderDef[] = [
     extraBody: () => ({ reasoning: { effort: 'low', exclude: true } }),
     extraHeaders: { 'HTTP-Referer': 'https://github.com/praneethposina/Auction_Game', 'X-Title': 'Company Auction Game' },
     discover: { mode: 'openrouter-free', needsKey: false },
+    validateUrl: 'https://openrouter.ai/api/v1/key',
+  },
+  {
+    id: 'openrouter-paid',
+    label: 'OpenRouter (paid models)',
+    envVar: 'OPENROUTER_API_KEY',
+    signupUrl: 'https://openrouter.ai/settings/credits',
+    freeTier: 'Paid models, billed to your OpenRouter credits. Uses your saved OpenRouter key. Prices are $ per million input/output tokens.',
+    keyHint: 'sk-or-v1-…',
+    userKeys: true,
+    keyFrom: 'openrouter',
+    baseUrl: () => 'https://openrouter.ai/api/v1',
+    // Never the server's key: paid calls only ever spend the player's own credits.
+    serverKey: () => undefined,
+    models: [],
+    extraBody: () => ({ reasoning: { effort: 'low', exclude: true } }),
+    extraHeaders: { 'HTTP-Referer': 'https://github.com/praneethposina/Auction_Game', 'X-Title': 'Company Auction Game' },
+    discover: { mode: 'openrouter-paid', needsKey: false },
     validateUrl: 'https://openrouter.ai/api/v1/key',
   },
   {
@@ -164,6 +184,9 @@ export function providerById(id: string): ProviderDef | undefined {
   return PROVIDERS.find((p) => p.id === id);
 }
 
+/** The provider id a player's saved key is stored under (paid OpenRouter shares the OpenRouter key). */
+export const keyProviderId = (p: ProviderDef) => p.keyFrom ?? p.id;
+
 export function serverCredentials(p: ProviderDef): Credentials | null {
   const baseUrl = p.baseUrl();
   const apiKey = p.serverKey();
@@ -206,7 +229,16 @@ export async function validateKey(p: ProviderDef, apiKey: string): Promise<KeyCh
 
 // Model discovery is cached per provider so the lobby stays snappy.
 const CACHE_MS = 30 * 60 * 1000;
-const discovered = new Map<string, { at: number; models: { model: string; label: string }[] }>();
+const discovered = new Map<string, { at: number; models: { model: string; label: string; note?: string }[] }>();
+
+/** "$0.30/$1.20" per million tokens, from OpenRouter's per-token prices. */
+function perMillion(pricing: { prompt?: string; completion?: string } | undefined): string | undefined {
+  const inp = Number(pricing?.prompt);
+  const out = Number(pricing?.completion);
+  if (!Number.isFinite(inp) || !Number.isFinite(out) || inp < 0 || out < 0) return undefined;
+  const fmt = (v: number) => `$${(v * 1e6).toFixed(v * 1e6 < 1 ? 2 : v * 1e6 < 10 ? 1 : 0)}`;
+  return `${fmt(inp)}/${fmt(out)} per M tokens`;
+}
 
 const EXCLUDE =
   /(guard|safety|safeguard|embed|whisper|tts|orpheus|coder|code|sante|vision-exp|ocr|image|audio|live|veo|imagen|aqa|lyria|transcribe|robotics|computer-use)/i;
@@ -224,12 +256,19 @@ async function discoverModels(p: ProviderDef, apiKey: string | undefined) {
       signal: AbortSignal.timeout(6000),
     });
     if (!res.ok) return null;
-    const body = (await res.json()) as { data?: { id: string; name?: string; display_name?: string }[] };
+    const body = (await res.json()) as {
+      data?: { id: string; name?: string; display_name?: string; pricing?: { prompt?: string; completion?: string } }[];
+    };
     const mapId = p.discover.mapId ?? ((id: string) => id);
-    let list = (body.data ?? []).map((m) => ({
-      model: mapId(m.id),
-      label: (m.name ?? m.display_name ?? mapId(m.id)).replace(/\s*\(free\)\s*$/i, ''),
-    }));
+    const paid = p.discover.mode === 'openrouter-paid';
+    let list = (body.data ?? [])
+      // ":batch" variants are asynchronous batch endpoints, useless mid-auction.
+      .filter((m) => !paid || (!/:(free|batch)$/.test(m.id) && Number(m.pricing?.prompt) > 0 && Number(m.pricing?.completion) > 0))
+      .map((m) => ({
+        model: mapId(m.id),
+        label: (m.name ?? m.display_name ?? mapId(m.id)).replace(/\s*\(free\)\s*$/i, ''),
+        ...(paid ? { note: perMillion(m.pricing) } : {}),
+      }));
     if (p.discover.mode === 'openrouter-free') list = list.filter((m) => m.model.endsWith(':free'));
     list = list.filter((m) => !EXCLUDE.test(m.model));
     discovered.set(p.id, { at: Date.now(), models: list });
@@ -253,13 +292,13 @@ export async function buildCatalog(accountKeys: Map<string, string> = new Map())
     keyHint: p.keyHint,
     userKeys: p.userKeys,
     serverKey: serverCredentials(p) !== null,
-    yourKey: accountKeys.has(p.id),
+    yourKey: accountKeys.has(keyProviderId(p)),
   }));
 
   const models: ModelOption[] = [];
   await Promise.all(
     PROVIDERS.map(async (p) => {
-      const key = accountKeys.get(p.id) ?? p.serverKey();
+      const key = accountKeys.get(keyProviderId(p)) ?? p.serverKey();
       const live = await discoverModels(p, key);
       const liveIds = live ? new Set(live.map((m) => m.model)) : null;
       const curated = p.models.filter((m) => p.id !== 'openrouter' || !liveIds || liveIds.has(m.model));
@@ -274,7 +313,7 @@ export async function buildCatalog(accountKeys: Map<string, string> = new Map())
       if (live) {
         const known = new Set(curated.map((m) => m.model));
         for (const m of live) {
-          if (!known.has(m.model)) out.push({ provider: p.id, providerLabel: p.label, model: m.model, label: m.label });
+          if (!known.has(m.model)) out.push({ provider: p.id, providerLabel: p.label, model: m.model, label: m.label, note: m.note });
         }
       }
       models.push(...out);

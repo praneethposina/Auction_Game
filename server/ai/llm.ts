@@ -1,19 +1,33 @@
 import { COMBO_BY_ID } from '../../shared/data/combos.ts';
 import { SECTORS } from '../../shared/data/sectors.ts';
-import { likelyRange, money, pct, TIER_LABEL, VALUATION_MULTIPLE } from '../../shared/economy.ts';
-import { PERSONAS, WIN_CONDITION_LABEL, type Persona } from '../../shared/types.ts';
+import { likelyRange, pct, VALUATION_MULTIPLE } from '../../shared/economy.ts';
+import { PERSONAS, type Persona } from '../../shared/types.ts';
 import type { EnginePlayer, Game } from '../game/engine.ts';
 import { appraise } from './appraise.ts';
 import type { AiDecision } from './bot.ts';
 import { providerById, type Credentials } from './models.ts';
 
 const WIN_EXPLAIN = {
-  netWorth: 'Highest final cash + end-of-game company value wins. Every dollar overpaid is a dollar lost.',
-  roi: 'Highest (all payouts received + end-of-game company value) ÷ total money spent wins. Only buy bargains; buying nothing scores 0.',
-  purse: 'Highest cash at the end wins. Company value at the end does NOT count, only the payouts it earns before the game ends.',
-  portfolio: 'Highest total end-of-game company value wins. Leftover cash is worthless, so spend it all wisely.',
+  netWorth: 'highest final cash + company end value. Overpaying loses.',
+  roi: 'highest (payouts received + company end value) / money spent. Buy bargains only; buying nothing scores 0.',
+  purse: 'highest final cash. End value does NOT count, only payouts collected before the game ends.',
+  portfolio: 'highest total company end value. Leftover cash is worthless: spend it all, wisely.',
 };
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+/** Tip text without emoji or "Insider tip:" noise. */
+const plainTip = (text: string) =>
+  text
+    .replace(/^Insider tip:\s*/i, '')
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * The prompt is split for size: a system message that never changes during the game (rules,
+ * persona, answer format, so providers can cache it) and a small JSON object with only what
+ * matters for this one decision. Everything is in $M.
+ */
 export function buildPrompt(game: Game, player: EnginePlayer, companyId: string, persona: Persona) {
   const s = game.settings;
   const c = game.company(companyId)!;
@@ -22,122 +36,105 @@ export function buildPrompt(game: Game, player: EnginePlayer, companyId: string,
   const event = game.currentEvent();
   const sector = SECTORS[c.def.sector];
   const nameOf = (id: string) => game.company(id)?.def.name ?? id;
-  const ownerOf = (id: string) => {
-    const co = game.company(id);
-    if (!co) return 'not in this game';
-    if (co.ownerId === player.id) return 'you';
-    if (co.ownerId) return game.player(co.ownerId)!.name;
-    if (co.status === 'unsold') return 'withdrawn';
-    return co.def.id === companyId ? 'on the block' : 'upcoming';
-  };
 
   const system = [
-    `You are "${player.name}", an AI player in a fast multiplayer company-auction game.`,
-    `Persona: ${PERSONAS[persona].label}. ${PERSONAS[persona].blurb}`,
-    'Think like a sharp investor, use your private intel, and be decisive.',
-    'Your "reason" is read out to ALL players after the sale. Never reveal your private intel, sector heat, your cash, or the turnovers of companies you own; explain in general terms (synergies, news, timing, budget pacing).',
-    'Reply with ONLY a JSON object and nothing else:',
-    '{"max_bid": <integer, 0 to pass>, "reason": "<max 30 words>"}',
+    `You are "${player.name}", an AI bidder in a company-auction game. Style: ${PERSONAS[persona].label}: ${PERSONAS[persona].blurb}`,
+    `Rules (money in $M): every company pays at the end of each round, including the round it is bought: turnover x (1 + synergy) x news demand${s.runningCosts ? ' - running cost x news cost' : ''}. Owning 2/3/4+ in one sector gives each +10/20/35%; named combos add more. At game end a company is worth ${VALUATION_MULTIPLE}x its net per round. Turnovers are hidden; only the owner learns them.`,
+    `Win: ${WIN_EXPLAIN[s.winCondition]}`,
+    s.auctionMode === 'open'
+      ? 'Open auction: give your MAXIMUM price; an agent raises for you, so you usually pay just above the runner-up.'
+      : 'Sealed first-price auction: one secret bid each, the highest wins and pays its bid. Shade below your value.',
+    'Each turn you get the state as JSON. est = your turnover estimate [low, mid, high] using your intel. avg_value = rough average worth to you. intel = private true facts.',
+    'Your "reason" is shown to ALL players: never mention your intel, sector heat, your cash or your companies\' turnovers.',
+    'Reply with ONLY: {"max_bid": <integer, 0 = pass>, "reason": "<15 words max>"}',
   ].join('\n');
 
-  const expectedBuys = Math.max(1, Math.round(((game.upcomingCount() + 1) / game.players.length) * 10) / 10);
-  const analystNotes = [
-    a.heatNote,
-    a.lossChance > 0.15 ? `${Math.round(a.lossChance * 100)}% chance it loses money in an average round` : null,
-    a.denialNote ? `it ${a.denialNote}` : null,
-    a.foresightNote,
-  ].filter(Boolean);
-  const holdings = game.holdingsView(player);
-  const portfolio =
-    holdings.length === 0
-      ? '- (none yet)'
-      : holdings
-          .map(
-            (h) =>
-              `- ${nameOf(h.companyId)} (${SECTORS[game.company(h.companyId)!.def.sector].short}): turnover ${money(h.turnover)}, net ${money(h.netPerRound)}/round, synergy ${pct(h.synergy.total)}`,
-          )
-          .join('\n');
+  const upcoming = game.companies.filter((x) => x.status === 'upcoming');
+  const expectedBuys = Math.max(1, (upcoming.length + 1) / game.players.length);
+  const lotCombos = game.activeComboIds.map((id) => COMBO_BY_ID[id]).filter((combo) => combo.members.includes(companyId));
+  const related = new Set(lotCombos.flatMap((combo) => combo.members));
+  const owned = (id: string) => game.company(id)?.ownerId ?? null;
 
-  const intel = player.intel.length === 0 ? '- (none)' : player.intel.map((t) => `- ${t.text}`).join('\n');
+  const later = upcoming.filter((x) => x.def.sector === c.def.sector || related.has(x.def.id));
+  const nearby = new Set([companyId, ...later.map((x) => x.def.id)]);
 
-  const opponents = game.players
+  // Only tips that bear on this decision: this company, related ones still to come, its sector,
+  // or next round's news.
+  const intel = player.intel
+    .filter(
+      (t) =>
+        t.companyIds.some((id) => nearby.has(id)) ||
+        (t.kind === 'sectorHeat' && t.sectorId === c.def.sector) ||
+        (t.kind === 'nextEvent' && t.round === game.round),
+    )
+    .map((t) => plainTip(t.text));
+
+  const lot: Record<string, unknown> = {
+    name: c.def.name,
+    sector: sector.short,
+    tier: c.def.tier,
+    typical: [range.low, range.high],
+    est: [a.estLow, a.estTurnover, a.estHigh],
+  };
+  if (s.runningCosts) lot.running_cost = c.runningCost;
+  const effect: Record<string, number> = {};
+  if (a.eventDemand !== 1) effect.demand = round2(a.eventDemand);
+  if (s.runningCosts && a.eventCost !== 1) effect.cost = round2(a.eventCost);
+  if (Object.keys(effect).length) lot.news_effect = effect;
+  if (a.synergy > 0) lot.synergy_if_won = pct(a.synergy);
+  if (a.newCombos.length) lot.completes = a.newCombos;
+  const boost = Object.entries(a.uplift).map(([id, inc]) => `${nameOf(id)} ${pct(inc)}`);
+  if (boost.length) lot.boosts = boost;
+  lot.avg_value = Math.round(a.value);
+  if (a.lossChance > 0.15) lot.loss_chance = pct(a.lossChance);
+
+  const notes = [a.heatNote, a.denialNote ? `it ${a.denialNote}` : null, a.potentialNote, a.foresightNote].filter(Boolean);
+
+  const rivals: Record<string, number> = {};
+  for (const p of game.players) if (p.id !== player.id) rivals[p.name] = p.holdings.length;
+
+  const combos = lotCombos.slice(0, 4).map((combo) => {
+    const members = combo.members.filter((m) => game.company(m) && m !== companyId);
+    const mine = members.filter((m) => owned(m) === player.id).map(nameOf);
+    const theirs = members
+      .filter((m) => owned(m) && owned(m) !== player.id)
+      .map((m) => `${nameOf(m)} (${game.player(owned(m)!)!.name})`);
+    const open = members.filter((m) => game.company(m)!.status === 'upcoming').map(nameOf);
+    return {
+      name: combo.name,
+      bonus: combo.tiers.map((t) => `${t.need}:${pct(t.bonus)}`).join(' '),
+      ...(combo.anchor ? { needs: nameOf(combo.anchor) } : {}),
+      ...(mine.length ? { yours: mine } : {}),
+      ...(theirs.length ? { rivals: theirs } : {}),
+      ...(open.length ? { to_come: open } : {}),
+    };
+  });
+
+  const sectorRivals = game.players
     .filter((p) => p.id !== player.id)
-    .map((p) => `- ${p.name}: ${p.holdings.length ? p.holdings.map((h) => nameOf(h.companyId)).join(', ') : 'nothing yet'}`)
-    .join('\n');
+    .map((p) => [p.name, p.holdings.filter((h) => game.company(h.companyId)!.def.sector === c.def.sector).length] as const)
+    .filter(([, n]) => n > 0);
 
-  const upcoming = game.companies
-    .filter((x) => x.status === 'upcoming')
-    .map((x) => `${x.def.name} (${SECTORS[x.def.sector].short}, ${TIER_LABEL[x.def.tier]})`)
-    .join('; ');
+  const state: Record<string, unknown> = {
+    round: `${game.round}/${game.totalRounds}`,
+    payouts_if_won: a.payoutsLeft,
+    cash: player.purse,
+    per_buy_budget: Math.round(player.purse / expectedBuys),
+    min_bid: game.minOpeningBid(),
+    lot,
+  };
+  if (event) state.news = event.headline;
+  if (notes.length) state.notes = notes;
+  if (intel.length) state.intel = intel;
+  const holdings = game.holdingsView(player);
+  if (holdings.length)
+    state.mine = holdings.map((h) => `${nameOf(h.companyId)} (${SECTORS[game.company(h.companyId)!.def.sector].short}) turnover ${h.turnover}, net ${h.netPerRound}`);
+  state.rivals_companies = rivals;
+  if (sectorRivals.length) state[`rivals_in_${sector.short}`] = Object.fromEntries(sectorRivals);
+  if (combos.length) state.combos = combos;
+  state.to_come = later.length ? { count: upcoming.length, related: later.slice(0, 8).map((x) => x.def.name) } : upcoming.length;
 
-  const combos = game.activeComboIds
-    .map((id) => COMBO_BY_ID[id])
-    .filter((combo) => combo.members.includes(companyId) || combo.members.some((m) => ownerOf(m) === 'you'))
-    .slice(0, 8)
-    .map((combo) => {
-      const tiers = combo.tiers.map((t) => `${t.need}→${pct(t.bonus)}`).join(', ');
-      const members = combo.members
-        .filter((m) => game.company(m))
-        .map((m) => `${nameOf(m)} [${ownerOf(m)}]`)
-        .join(', ');
-      return `- ${combo.name} (${tiers}${combo.anchor ? `, must include ${nameOf(combo.anchor)}` : ''}): ${members}`;
-    })
-    .join('\n');
-
-  const auctionRule =
-    s.auctionMode === 'open'
-      ? 'Open ascending auction. Give your MAXIMUM price: an agent raises for you in steps up to that limit, so you usually pay just above the runner-up.'
-      : 'Sealed-bid, first-price: everyone bids once in secret, the highest bid wins and pays exactly its bid. Shade your bid below your true value.';
-
-  const synergyLine =
-    a.synergy > 0
-      ? `If you win: synergy ${pct(a.synergy)} on it (you would own ${a.sectorCountAfter} ${sector.name} companies${a.newCombos.length ? `; activates ${a.newCombos.join(', ')}` : ''}).`
-      : 'If you win: no synergy with your current portfolio.';
-  const upliftLine = Object.keys(a.uplift).length
-    ? `It would also boost: ${Object.entries(a.uplift)
-        .map(([id, inc]) => `${nameOf(id)} ${pct(inc)}`)
-        .join(', ')}.`
-    : '';
-
-  const user = `RULES
-- Each company has a hidden turnover per round; only its buyer learns it.
-- At the end of EVERY round (including the round of purchase) each company pays: turnover × (1 + synergy) × news demand multiplier${s.runningCosts ? ' − running cost × news cost multiplier' : ''}.
-- Owning 2/3/4+ companies in one sector gives each +10%/+20%/+35%. Named combos add more.
-- At game end each company is worth ${VALUATION_MULTIPLE}× its normal net turnover per round.
-- WIN CONDITION: ${WIN_CONDITION_LABEL[s.winCondition]}. ${WIN_EXPLAIN[s.winCondition]}
-- ${auctionRule} Minimum bid ${money(game.minOpeningBid())}.
-
-SITUATION
-- Round ${game.round} of ${game.totalRounds}. This company collects ${a.payoutsLeft} payout(s) if bought now.
-- Your cash: ${money(player.purse)}. ${game.upcomingCount()} more companies after this one. ${game.players.length} players.
-- Budget pace: expect to win about ${expectedBuys} of the remaining companies, i.e. roughly ${money(player.purse / expectedBuys)} per company if spread evenly (payouts will add cash as you go).
-${event ? `- News this round: ${event.icon} ${event.headline}. ${event.story}\n- News effect on this company this round: demand ×${a.eventDemand.toFixed(2)}, costs ×${a.eventCost.toFixed(2)}.` : '- No market news this round.'}
-
-ON THE BLOCK: ${c.def.name} (${sector.name}, ${TIER_LABEL[c.def.tier]} tier, HQ ${c.def.hq}). ${c.def.tagline}.
-- ${TIER_LABEL[c.def.tier]}-tier turnover is usually ${money(range.low)}–${money(range.high)} per round (avg ${money(range.mean)}).
-- Your estimate using your intel: ~${money(a.estTurnover)} (likely ${money(a.estLow)}–${money(a.estHigh)}).${s.runningCosts ? `\n- Running cost: ${money(c.runningCost)} per round.` : ''}
-- ${synergyLine} ${upliftLine}
-- Naive average-case worth to you (payouts + end value, ignores strategy and competition): ~${money(a.value)}.${
-    analystNotes.length ? `\n- Analyst notes: ${analystNotes.join('; ')}.` : ''
-  }
-
-YOUR PORTFOLIO
-${portfolio}
-
-YOUR PRIVATE INTEL (true facts only you know)
-${intel}
-
-OPPONENTS (their cash and turnovers are hidden)
-${opponents}
-
-RELEVANT COMBOS
-${combos || '- (none)'}
-
-STILL TO COME: ${upcoming || '(nothing, this is the last company)'}
-
-What is your maximum bid for ${c.def.name}? Reply with JSON only.`;
-
-  return { system, user };
+  return { system, user: JSON.stringify(state) };
 }
 
 // ── Answer parsing ──────────────────────────────────────────────
@@ -303,10 +300,58 @@ export function publicSafeReason(reason: string, game: Game, player: EnginePlaye
   return reason;
 }
 
+/** Why a call failed, for the game log. */
+export type LlmFailure =
+  | 'timeout'
+  | 'rate_limited'
+  | 'no_credits'
+  | 'bad_key'
+  | 'http_error'
+  | 'network'
+  | 'queue_timeout'
+  | 'empty'
+  | 'out_of_tokens'
+  | 'unreadable'
+  | 'unknown_provider';
+
 export class LlmError extends Error {
   /** The provider will keep failing for this key (no credits, bad key): stop calling it. */
   fatal = false;
+  code: LlmFailure;
+  constructor(message: string, code: LlmFailure) {
+    super(message);
+    this.code = code;
+  }
 }
+
+/** One HTTP request to the provider. */
+export interface LlmAttempt {
+  step: 'ask' | 'no_json_mode' | 'rate_limit_retry' | 'short_think' | 'repair';
+  ms: number;
+  status?: number;
+  finish?: string | null;
+  promptTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  answerChars?: number;
+  reasoningChars?: number;
+  error?: string;
+}
+
+/** Everything about one decision, filled in as it happens (also when it fails), for the game log. */
+export interface LlmTrace {
+  system: string;
+  user: string;
+  laneWaitMs: number;
+  attempts: LlmAttempt[];
+  /** The model's last visible answer and the tail of its reasoning, trimmed. */
+  answer?: string;
+  reasoningTail?: string;
+  parsedFrom?: 'answer' | 'reasoning' | 'short_think' | 'repair';
+  withheldReason?: boolean;
+}
+
+export const newTrace = (): LlmTrace => ({ system: '', user: '', laneWaitMs: 0, attempts: [] });
 
 /** Pull a readable message out of a provider error body (often JSON). */
 function providerMessage(body: string): string {
@@ -333,7 +378,7 @@ async function acquireLane(key: string, deadline: number): Promise<() => void> {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         l.waiting = l.waiting.filter((w) => w !== go);
-        reject(Object.assign(new LlmError('was queued behind other AI players too long'), {}));
+        reject(new LlmError('was queued behind other AI players on the same key too long', 'queue_timeout'));
       }, Math.max(0, deadline - Date.now()));
       const go = () => {
         clearTimeout(timer);
@@ -360,46 +405,96 @@ interface ChatAnswer {
   finish: string | null;
 }
 
+interface ChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  completion_tokens_details?: { reasoning_tokens?: number };
+}
+
 async function chat(
   base: string,
   key: string,
   headers: Record<string, string>,
   body: Record<string, unknown>,
   timeoutMs: number,
+  attempt: LlmAttempt,
 ): Promise<ChatAnswer> {
-  const res = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, ...headers },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    const err = new LlmError(
-      res.status === 429
-        ? 'was rate limited by the provider'
-        : res.status === 402
-          ? `is out of credits (${providerMessage(text)})`
-          : res.status === 401 || res.status === 403
-            ? `had its API key rejected (HTTP ${res.status})`
-            : `got an error from the provider (HTTP ${res.status}: ${providerMessage(text)})`,
-    );
-    err.fatal = res.status === 401 || res.status === 402 || res.status === 403;
-    Object.assign(err, { status: res.status, body: text, retryAfter: Number(res.headers.get('retry-after')) || 0 });
-    throw err;
+  const started = Date.now();
+  try {
+    let res: Response;
+    try {
+      res = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, ...headers },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(Math.max(1000, timeoutMs)),
+      });
+    } catch (err) {
+      const e = err as Error;
+      if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+        attempt.error = `no answer within ${(Math.max(1000, timeoutMs) / 1000).toFixed(1)}s`;
+        throw new LlmError('took too long to answer', 'timeout');
+      }
+      attempt.error = `network: ${e.message}`.slice(0, 160);
+      throw new LlmError(`could not reach the provider (${e.message})`, 'network');
+    }
+    attempt.status = res.status;
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      attempt.error = providerMessage(text);
+      const code: LlmFailure =
+        res.status === 429 ? 'rate_limited' : res.status === 402 ? 'no_credits' : res.status === 401 || res.status === 403 ? 'bad_key' : 'http_error';
+      const err = new LlmError(
+        code === 'rate_limited'
+          ? 'was rate limited by the provider'
+          : code === 'no_credits'
+            ? `is out of credits (${providerMessage(text)})`
+            : code === 'bad_key'
+              ? `had its API key rejected (HTTP ${res.status})`
+              : `got an error from the provider (HTTP ${res.status}: ${providerMessage(text)})`,
+        code,
+      );
+      err.fatal = code === 'no_credits' || code === 'bad_key';
+      Object.assign(err, { status: res.status, retryAfter: Number(res.headers.get('retry-after')) || 0 });
+      throw err;
+    }
+    let data: {
+      choices?: {
+        finish_reason?: string | null;
+        message?: { content?: string | null; reasoning?: string | null; reasoning_content?: string | null };
+      }[];
+      usage?: ChatUsage;
+    };
+    try {
+      data = (await res.json()) as typeof data;
+    } catch (err) {
+      const e = err as Error;
+      if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+        attempt.error = 'answer was cut off by the time limit';
+        throw new LlmError('took too long to answer', 'timeout');
+      }
+      attempt.error = 'response was not JSON';
+      throw new LlmError('sent a response that is not valid JSON', 'http_error');
+    }
+    const choice = data.choices?.[0];
+    const answer = {
+      content: choice?.message?.content ?? '',
+      reasoning: choice?.message?.reasoning_content ?? choice?.message?.reasoning ?? '',
+      finish: choice?.finish_reason ?? null,
+    };
+    attempt.finish = answer.finish;
+    attempt.answerChars = answer.content.length;
+    if (answer.reasoning) attempt.reasoningChars = answer.reasoning.length;
+    if (data.usage) {
+      attempt.promptTokens = data.usage.prompt_tokens;
+      attempt.outputTokens = data.usage.completion_tokens;
+      const r = data.usage.completion_tokens_details?.reasoning_tokens;
+      if (r) attempt.reasoningTokens = r;
+    }
+    return answer;
+  } finally {
+    attempt.ms = Date.now() - started;
   }
-  const data = (await res.json()) as {
-    choices?: {
-      finish_reason?: string | null;
-      message?: { content?: string | null; reasoning?: string | null; reasoning_content?: string | null };
-    }[];
-  };
-  const choice = data.choices?.[0];
-  return {
-    content: choice?.message?.content ?? '',
-    reasoning: choice?.message?.reasoning_content ?? choice?.message?.reasoning ?? '',
-    finish: choice?.finish_reason ?? null,
-  };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -412,19 +507,27 @@ export async function llmDecision(opts: {
   credentials: Credentials;
   model: string;
   timeoutMs: number;
+  /** Filled in with timings, token counts and the raw answer, for the game log. */
+  trace?: LlmTrace;
 }): Promise<AiDecision> {
+  const trace = opts.trace ?? newTrace();
   const found = providerById(opts.credentials.provider);
-  if (!found) throw new LlmError(`unknown provider ${opts.credentials.provider}`);
+  if (!found) throw new LlmError(`unknown provider ${opts.credentials.provider}`, 'unknown_provider');
   const provider = found;
   const { baseUrl, apiKey } = opts.credentials;
   const deadline = Date.now() + opts.timeoutMs;
   const left = () => deadline - Date.now();
   const modelKey = `${provider.id}:${opts.model}`;
   const { system, user } = buildPrompt(opts.game, opts.player, opts.companyId, opts.persona);
+  trace.system = system;
+  trace.user = user;
   const startingBudget = opts.game.settings.startingBudget;
   const extra = provider.extraBody?.(opts.model) ?? {};
 
-  const release = await acquireLane(`${baseUrl}|${apiKey}`, deadline);
+  const queued = Date.now();
+  const release = await acquireLane(`${baseUrl}|${apiKey}`, deadline).finally(() => {
+    trace.laneWaitMs = Date.now() - queued;
+  });
   try {
     return await decideWithRetries();
   } finally {
@@ -432,28 +535,40 @@ export async function llmDecision(opts: {
   }
 
   async function decideWithRetries(): Promise<AiDecision> {
-    const ask = async (messages: { role: string; content: string }[], maxTokens: number): Promise<ChatAnswer> => {
+    const ask = async (
+      step: LlmAttempt['step'],
+      messages: { role: string; content: string }[],
+      maxTokens: number,
+    ): Promise<ChatAnswer> => {
       const base = { model: opts.model, messages, temperature: 0.6, max_tokens: maxTokens, ...extra };
       const jsonMode = !noJsonMode.has(modelKey);
       let rateRetried = false;
       for (;;) {
+        const attempt: LlmAttempt = { step, ms: 0 };
+        trace.attempts.push(attempt);
         try {
-          return await chat(
+          const answer = await chat(
             baseUrl,
             apiKey,
             provider.extraHeaders ?? {},
             jsonMode && !noJsonMode.has(modelKey) ? { ...base, response_format: { type: 'json_object' } } : base,
             left(),
+            attempt,
           );
+          trace.answer = answer.content.slice(-1500);
+          trace.reasoningTail = answer.reasoning ? answer.reasoning.slice(-600) : undefined;
+          return answer;
         } catch (err) {
           const e = err as LlmError & { status?: number; retryAfter?: number };
           if (e.status === 400 && jsonMode && !noJsonMode.has(modelKey)) {
             noJsonMode.add(modelKey); // provider doesn't do JSON mode; ask again without it
+            step = 'no_json_mode';
             continue;
           }
           const wait = Math.min(4000, (e.retryAfter || 1.5) * 1000);
           if (e.status === 429 && !rateRetried && left() > wait + 4000) {
             rateRetried = true;
+            step = 'rate_limit_retry';
             await sleep(wait);
             continue;
           }
@@ -462,26 +577,35 @@ export async function llmDecision(opts: {
       }
     };
 
+    const purse = opts.player.purse;
     const messages = [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ];
-    let answer = await ask(messages, 2048);
-    let parsed = parseDecision(answer.content, opts.player.purse, startingBudget) ??
-      parseDecision(answer.reasoning.slice(-2000), opts.player.purse, startingBudget);
+    let answer = await ask('ask', messages, 2048);
+    let parsed = parseDecision(answer.content, purse, startingBudget);
+    if (parsed) trace.parsedFrom = 'answer';
+    else {
+      parsed = parseDecision(answer.reasoning.slice(-2000), purse, startingBudget);
+      if (parsed) trace.parsedFrom = 'reasoning';
+    }
 
     // Thinking models sometimes spend the whole budget reasoning and never answer.
     if (!parsed && !visibleAnswer(answer.content) && answer.finish === 'length' && left() > 6000) {
       answer = await ask(
+        'short_think',
         [{ role: 'system', content: `${system}\nDo not deliberate at length: output the JSON object right away.` }, messages[1]],
         4096,
       );
-      parsed = parseDecision(answer.content, opts.player.purse, startingBudget);
+      parsed = parseDecision(answer.content, purse, startingBudget);
+      if (parsed) trace.parsedFrom = 'short_think';
     }
 
     // It answered, just not in a readable shape: ask it to restate as bare JSON.
     if (!parsed && visibleAnswer(answer.content) && left() > 4000) {
+      const unreadable = answer;
       const repair = await ask(
+        'repair',
         [
           ...messages,
           { role: 'assistant', content: visibleAnswer(answer.content).slice(-1500) },
@@ -489,27 +613,32 @@ export async function llmDecision(opts: {
         ],
         300,
       ).catch(() => null);
-      if (repair) parsed = parseDecision(repair.content, opts.player.purse, startingBudget);
+      if (repair) parsed = parseDecision(repair.content, purse, startingBudget);
+      if (parsed) trace.parsedFrom = 'repair';
+      else {
+        // Keep the original unreadable answer in the log, not the failed restatement.
+        answer = unreadable;
+        trace.answer = unreadable.content.slice(-1500);
+      }
     }
 
     if (!parsed) {
-      const why = !visibleAnswer(answer.content)
+      const [why, code]: [string, LlmFailure] = !visibleAnswer(answer.content)
         ? answer.finish === 'length'
-          ? 'ran out of tokens while thinking'
-          : 'returned an empty answer'
-        : 'gave an unreadable answer';
-      console.warn(
-        `[llm] ${provider.id}/${opts.model} ${why} (finish=${answer.finish}): ${JSON.stringify(answer.content.slice(0, 300))}`,
-      );
-      throw new LlmError(why);
+          ? ['ran out of tokens while thinking', 'out_of_tokens']
+          : ['returned an empty answer', 'empty']
+        : ['gave an unreadable answer', 'unreadable'];
+      throw new LlmError(why, code);
     }
     let maxBid = parsed.maxBid;
     if (maxBid > 0 && maxBid < opts.game.minOpeningBid()) maxBid = 0;
     const reason = parsed.reason || '(no reason given)';
+    const safe = publicSafeReason(reason, opts.game, opts.player);
+    trace.withheldReason = safe === null;
     return {
       maxBid,
       reason,
-      publicReason: publicSafeReason(reason, opts.game, opts.player) ?? '(Reasoning kept private until the game ends.)',
+      publicReason: safe ?? '(Reasoning kept private until the game ends.)',
       source: 'llm',
     };
   }

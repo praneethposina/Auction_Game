@@ -59,6 +59,7 @@ Built-in bots need nothing. For LLM players:
 | [Cerebras](https://cloud.cerebras.ai) | Free daily token allowance | Listed live from your key |
 | [Google Gemini](https://aistudio.google.com/apikey) | Free tier | Listed live from your key |
 | [Hugging Face](https://huggingface.co/settings/tokens) | Small monthly credits | DeepSeek V4.1 Flash, Kimi K3, GLM 5.3 Flash |
+| OpenRouter (paid models) | Paid, billed to your OpenRouter credits. Uses the same saved OpenRouter key | Any paid OpenRouter model; the picker shows $ per million input/output tokens and has a search box |
 
 How keys are handled:
 
@@ -67,8 +68,28 @@ How keys are handled:
 - They're only used for AI players that the key's owner adds to a game.
 - Other players never see them.
 
-Each LLM is called once per company (about 20 requests per LLM player per game). If a call fails
-or is rate-limited, a built-in brain bids instead and its reasoning is tagged "backup".
+Each LLM is called once per company (about 20 requests per LLM player per game), with a compact
+JSON prompt of roughly 400–500 tokens. If a call fails or is rate-limited, a built-in brain bids
+instead and its reasoning is tagged "backup". Paid OpenRouter models never use a server key, only
+the player's own.
+
+### Game logs
+
+Every game keeps a log for debugging. Open it with **📜 Log** in the game bar (host) or
+**📜 Game log** on the results screen. Signed-in players also find past games under
+**Your account → Recent games**. Logs are kept for 30 days.
+
+- **Per LLM player:** answered/total, average, p95 and max response time, answers that came
+  too late, token use (from the provider's own counts), and failure reasons.
+- **Timeline:** every lot and sale, each AI decision, each LLM request, disconnects, pauses and
+  server restarts. Click a line for details. For an LLM call that means each HTTP attempt (status,
+  time, finish reason, tokens), the time spent queued behind other calls on the same key, and
+  how the answer was read.
+- **After the game** the log also shows each prompt, the raw answer, the AI's max bid, full
+  reasoning and hidden turnovers. While the game is running these stay hidden, so nobody can
+  peek at an AI's intel.
+- **⬇ JSON** downloads the whole log. Notable entries are also printed to the server's logs
+  (Railway) as one JSON line each, without the private parts.
 
 The server owner can also set shared keys in env vars (see `.env.example`). Every host on the
 server can use those, so leave them empty on a public deployment.
@@ -76,8 +97,9 @@ server can use those, so leave them empty on a public deployment.
 ## Deploy on Railway
 
 The live game runs on Railway, defined in code in `.railway/railway.ts`:
-- a `game` service built from this repo's `main` branch (`npm run build`, then `npm start`),
-  health-checked at `/api/health`, with 1 replica
+- a `game` service built from this repo's `main` branch (`npm run build`, then
+  `node --import tsx server/index.ts`), health-checked at `/api/health`, with 1 replica and 20
+  seconds to shut down
 - a Postgres database with its volume
 
 **Every push to `main` deploys automatically.** To change the infrastructure, edit
@@ -95,8 +117,15 @@ To set up your own copy from scratch:
 3. Add the two variables above to the game service.
 4. Open **Settings → Networking → Generate Domain**.
 
-Rooms live in memory, so keep a single replica. A redeploy ends games in progress; accounts
-and keys are kept.
+Rooms live in memory, so keep a single replica.
+
+**Deploys don't end games.** The running server saves every room to Postgres every 2 seconds.
+When Railway stops it for a deploy (SIGTERM, once the new version is healthy), it stops the game
+clocks, saves a final copy and hands the rooms over. Browsers show "The server is updating…",
+reconnect by themselves, and the new server picks each game up where it stopped: timers don't
+run while it's down, AI bids already made are kept, and AI players that were still thinking are
+asked again. Even a crash loses only the last couple of seconds. `/api/health` reports how many
+rooms and games are running.
 
 ### Other hosts
 
@@ -117,6 +146,7 @@ npm start       # serves the game and client on $PORT (default 3001)
 | `npm test` | Engine, AI and account tests (set `TEST_DATABASE_URL` to also test Postgres) |
 | `npm run typecheck` | TypeScript check |
 | `npm run simulate -- 300 5 20 open netWorth` | Plays bot-only games with mixed personalities and prints win rates per personality |
+| `npm run prompt-size -- 6 30` | Measures the LLM prompt size through a bot game |
 
 ## Project layout
 

@@ -59,10 +59,23 @@ describe('appraisal and prompt', () => {
     const me = game.player('llm')!;
     const other = game.player('h')!;
     other.purse = 8765;
-    const { user } = buildPrompt(game, me, companyId, 'tycoon');
-    expect(user).toContain(game.company(companyId)!.def.name);
-    for (const tip of me.intel) expect(user).toContain(tip.text);
-    expect(user).not.toContain('8,765');
+    const unrelated = game.companies.find(
+      (c) => c.status === 'upcoming' && c.def.sector !== game.company(companyId)!.def.sector,
+    )!;
+    me.intel = [
+      { id: 'a', kind: 'band', text: 'LOT TIP', companyIds: [companyId], data: { low: 1, high: 2 }, round: 1, source: 'start' },
+      { id: 'b', kind: 'band', text: 'OTHER TIP', companyIds: [unrelated.def.id], data: { low: 1, high: 2 }, round: 1, source: 'start' },
+    ];
+    const { system, user } = buildPrompt(game, me, companyId, 'tycoon');
+    const state = JSON.parse(user) as { lot: { name: string }; intel: string[]; cash: number };
+    expect(state.lot.name).toBe(game.company(companyId)!.def.name);
+    expect(state.cash).toBe(me.purse);
+    expect(state.intel).toContain('LOT TIP');
+    // Tips about unrelated companies are left out to keep the prompt small.
+    if (!user.includes(unrelated.def.name)) expect(state.intel).not.toContain('OTHER TIP');
+    expect(user).not.toContain('8765');
+    expect(system).toContain('max_bid');
+    expect(system.length + user.length).toBeLessThan(2500);
   });
 
   it('bots never bid more than they have', () => {

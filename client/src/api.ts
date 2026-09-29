@@ -1,4 +1,4 @@
-import type { AccountUser, SavedKey } from '../../shared/types.ts';
+import type { AccountUser, GameInfo, GameLogResponse, SavedKey } from '../../shared/types.ts';
 
 export interface KeyCheck {
   ok: boolean;
@@ -43,4 +43,6 @@ export const api = {
   saveKey: (provider: string, key: string) => call<{ ok: boolean; check: KeyCheck }>('PUT', `/api/keys/${provider}`, { key }),
   deleteKey: (provider: string) => call<{ ok: boolean }>('DELETE', `/api/keys/${provider}`, {}),
   testKey: (provider: string) => call<{ check: KeyCheck }>('POST', `/api/keys/${provider}/test`, {}),
+  myGames: () => call<{ games: GameInfo[] }>('GET', '/api/games'),
+  gameLogs: (gameId: string) => call<GameLogResponse>('GET', `/api/games/${encodeURIComponent(gameId)}/logs`),
 };

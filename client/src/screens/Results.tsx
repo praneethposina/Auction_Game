@@ -3,6 +3,7 @@ import { SECTORS, type SectorId } from '../../../shared/data/sectors.ts';
 import { money, pct } from '../../../shared/economy.ts';
 import { WIN_CONDITION_LABEL, type RoomView, type StandingView } from '../../../shared/types.ts';
 import { Monogram, personaLabel, PlayerTag } from '../components/common.tsx';
+import { GameLogModal } from '../components/GameLogModal.tsx';
 import { request } from '../socket.ts';
 
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -17,6 +18,7 @@ export function Results({ view, onLeave, onError }: { view: RoomView; onLeave: (
   const r = g.results;
   const [open, setOpen] = useState<string | null>(view.meId);
   const isHost = view.meId === view.hostId;
+  const [showLog, setShowLog] = useState(false);
   if (!r) return <div className="center-screen">Tallying results…</div>;
 
   const player = (id: string) => g.players.find((p) => p.id === id)!;
@@ -33,9 +35,15 @@ export function Results({ view, onLeave, onError }: { view: RoomView; onLeave: (
 
   return (
     <div className="page stack" style={{ gap: 16 }}>
+      {showLog && view.gameId && <GameLogModal gameId={view.gameId} onClose={() => setShowLog(false)} />}
       <div className="topbar">
         <div className="brand">🔨 Company Auction</div>
         <div className="row">
+          {view.gameId && (
+            <button className="btn sm ghost" onClick={() => setShowLog(true)} title="Everything that happened, incl. AI prompts, answers and timings">
+              📜 Game log
+            </button>
+          )}
           {isHost && (
             <button className="btn primary sm" onClick={rematch}>
               Play again

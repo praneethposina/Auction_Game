@@ -3,7 +3,7 @@ import { COMBO_BY_ID } from '../../../shared/data/combos.ts';
 import { SECTORS } from '../../../shared/data/sectors.ts';
 import { money, pct } from '../../../shared/economy.ts';
 import type { GameView } from '../../../shared/types.ts';
-import { Monogram, PersonaLine, personaLabel, PlayerTag, SectorChip, TierChip } from './common.tsx';
+import { Monogram, PersonaLine, personaLabel, PlayerTag, ProviderLine, SectorChip, TierChip } from './common.tsx';
 
 type PanelProps = { g: GameView; tabClass: (tab: string) => string };
 
@@ -229,6 +229,7 @@ export function PlayersPanel({ g, tabClass }: PanelProps) {
                 {p.id === g.me?.id && <span className="faint small">(you)</span>}
                 <PlayerTag kind={p.kind} model={p.ai?.modelLabel} />
               </div>
+              <ProviderLine kind={p.kind} ai={p.ai} />
               <PersonaLine kind={p.kind} ai={p.ai} />
               <div className="tiny muted" style={{ marginTop: 3 }}>
                 {p.companyIds.length === 0 ? 'No companies yet' : p.companyIds.map(nameOf).join(' · ')}

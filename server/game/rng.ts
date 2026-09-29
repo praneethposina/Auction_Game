@@ -2,6 +2,8 @@
 
 export interface Rng {
   next(): number;
+  /** Internal state; `createRng(state)` continues the exact same sequence. */
+  state(): number;
   int(min: number, max: number): number;
   pick<T>(items: readonly T[]): T;
   shuffle<T>(items: readonly T[]): T[];
@@ -22,6 +24,7 @@ export function createRng(seed: number): Rng {
   const int = (min: number, max: number) => min + Math.floor(next() * (max - min + 1));
   return {
     next,
+    state: () => a,
     int,
     pick: (items) => items[Math.floor(next() * items.length)],
     shuffle: (items) => {

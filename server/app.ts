@@ -8,6 +8,9 @@ import type {
   AccountUser,
   Ack,
   ClientToServer,
+  GameInfo,
+  GameLogEntry,
+  GameLogResponse,
   SavedKey,
   ServerToClient,
   SessionInfo,
@@ -15,6 +18,7 @@ import type {
 import {
   accountCredentials,
   buildCatalog,
+  keyProviderId,
   providerById,
   PROVIDERS,
   serverCredentials,
@@ -22,12 +26,19 @@ import {
   type Credentials,
 } from './ai/models.ts';
 import type { Store, UserRow } from './db/store.ts';
-import { RoomRegistry, type Room } from './rooms.ts';
+import { RoomKeeper } from './keeper.ts';
+import { RoomRegistry, type Room, type RoomServices } from './rooms.ts';
 import { hashPassword, hashToken, maskKey, newId, newToken, RateLimiter, verifyPassword, type Vault } from './security.ts';
 
 const TICK_MS = 100;
 const COOKIE = 'ca_session';
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
+const LOG_FLUSH_MS = 2000;
+const GAME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/** A game whose server vanished without finishing it: reveal its log after this long. */
+const STALE_GAME_MS = 12 * 60 * 60 * 1000;
+/** How long a reconnecting player waits for the old server to hand over their room. */
+const HANDOVER_WAIT_MS = 6000;
 const USERNAME = /^[A-Za-z0-9_.-]{3,20}$/;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,9 +69,15 @@ export interface AppOptions {
   /** Serve the built client from dist/ if present. */
   serveClient?: boolean;
   tickMs?: number;
+  /** Don't print game log lines (tests). */
+  quietLogs?: boolean;
+  /** Tests: override how often rooms are saved and when an owner counts as gone. */
+  keeper?: { saveEveryMs?: number; heartbeatMs?: number; staleMs?: number; instanceId?: string };
+  /** How long a reconnecting player waits for another server process to hand over their room. */
+  handoverWaitMs?: number;
 }
 
-export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }: AppOptions) {
+export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS, quietLogs = false, keeper: keeperOpts, handoverWaitMs = HANDOVER_WAIT_MS }: AppOptions) {
   const app = express();
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -115,8 +132,56 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
   };
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, db: store.db.kind });
+    const all = rooms.all();
+    res.json({
+      ok: !draining,
+      db: store.db.kind,
+      rooms: all.length,
+      playing: all.filter((r) => r.status === 'playing').length,
+      draining,
+    });
   });
+
+  // ── Game logs ───────────────────────────────────────────────
+
+  const gameInfo = (row: { id: string; roomCode: string; startedAt: number; endedAt: number | null; status: GameInfo['status']; info: string }): GameInfo => {
+    const info = JSON.parse(row.info) as Pick<GameInfo, 'players' | 'settings'>;
+    return { id: row.id, roomCode: row.roomCode, startedAt: row.startedAt, endedAt: row.endedAt, status: row.status, ...info };
+  };
+
+  app.get(
+    '/api/games',
+    wrap(async (req, res) => {
+      const user = await requireUser(req, res);
+      if (!user) return;
+      res.json({ games: (await store.userGames(user.id, 25)).map(gameInfo) });
+    }),
+  );
+
+  // The game id is the key: only players of that game are ever sent it.
+  app.get(
+    '/api/games/:id/logs',
+    wrap(async (req, res) => {
+      const id = String(req.params.id);
+      if (!/^[A-Za-z0-9_-]{16,40}$/.test(id)) return res.status(404).json({ error: 'No such game.' });
+      // Make sure the latest entries are in the database first.
+      const live = rooms.all().find((r) => r.gameId === id);
+      await live?.log?.flush();
+      const row = await store.getGame(id);
+      if (!row) return res.status(404).json({ error: 'No such game.' });
+      // The room in memory knows best (the "game over" write may still be on its way).
+      if (live?.status === 'finished' && row.status === 'playing') row.status = 'finished';
+      const revealed = row.status !== 'playing' || Date.now() - row.startedAt > STALE_GAME_MS;
+      const entries = (await store.gameLogs(id)).map((raw) => {
+        const e = JSON.parse(raw) as GameLogEntry;
+        if (!revealed) delete e.secret;
+        return e;
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      const body: GameLogResponse = { game: gameInfo(row), entries, revealed };
+      res.json(body);
+    }),
+  );
 
   // ── Auth ────────────────────────────────────────────────────
 
@@ -174,7 +239,7 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
 
   app.get('/api/providers', (_req, res) => {
     res.json({
-      providers: PROVIDERS.filter((p) => p.userKeys).map((p) => ({
+      providers: PROVIDERS.filter((p) => p.userKeys && !p.keyFrom).map((p) => ({
         id: p.id,
         label: p.label,
         signupUrl: p.signupUrl,
@@ -203,7 +268,7 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
       const user = await requireUser(req, res);
       if (!user) return;
       const provider = providerById(String(req.params.provider));
-      if (!provider?.userKeys) return res.status(404).json({ error: 'Unknown provider.' });
+      if (!provider?.userKeys || provider.keyFrom) return res.status(404).json({ error: 'Unknown provider.' });
       const key = String(req.body?.key ?? '').trim();
       if (key.length < 8 || key.length > 400 || /\s/.test(key))
         return res.status(400).json({ error: 'That doesn’t look like an API key.' });
@@ -264,7 +329,49 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
     pingInterval: 10000,
     pingTimeout: 8000,
   });
-  const rooms = new RoomRegistry();
+  const services: RoomServices = {
+    quietLogs,
+    writeLogs: (gameId, entries) => store.appendGameLogs(gameId, entries),
+    gameStarted: (room) => {
+      const info: Pick<GameInfo, 'players' | 'settings'> = {
+        settings: room.settings,
+        players: room.players.map((p) => ({
+          id: p.id,
+          name: p.name,
+          kind: p.kind,
+          ...(p.ai ? { persona: p.ai.persona, provider: p.ai.provider, model: p.ai.model, modelLabel: p.ai.modelLabel } : {}),
+        })),
+      };
+      const gameId = room.gameId!;
+      void store
+        .createGame({ id: gameId, roomCode: room.code, startedAt: room.gameStartedAt ?? Date.now(), info: JSON.stringify(info) })
+        .then(() => Promise.all([...room.accounts.values()].map((uid) => store.addGameMember(gameId, uid))))
+        .catch((err: unknown) => console.warn(`[games] could not record game ${gameId}: ${String(err)}`));
+    },
+    gameEnded: (room, status) => {
+      if (room.gameId) void store.endGame(room.gameId, status, Date.now()).catch(() => {});
+    },
+  };
+  const rooms: RoomRegistry = new RoomRegistry(services, (room) => keeper.forgetSaved(room.code));
+  const keeper = new RoomKeeper(store, rooms, {
+    seal: (plain) => vault.encrypt(plain),
+    unseal: (sealed) => vault.decrypt(sealed),
+    ...keeperOpts,
+  });
+  keeper.start();
+  let draining = false;
+
+  /** A room in memory, or one another server process is handing over (during a deploy). */
+  async function findRoom(code: unknown): Promise<{ room?: Room; busy?: boolean }> {
+    const local = rooms.get(code);
+    if (local) return { room: local };
+    if (typeof code !== 'string' || !/^[A-Za-z0-9]{4,8}$/.test(code.trim())) return {};
+    const r = await keeper.claimWithin(code.trim().toUpperCase(), handoverWaitMs);
+    if ('room' in r) return { room: r.room };
+    return 'busy' in r ? { busy: true } : {};
+  }
+
+  const restarting = { ok: false as const, error: 'The server is restarting. Your game is saved; reconnecting…', retry: true };
 
   io.use((raw, next) => {
     const socket = raw as GameSocket;
@@ -322,12 +429,18 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
       }
       socket.data.code = room.code;
       socket.data.playerId = playerId;
+      const user = socket.data.user;
+      if (user && room.player(playerId)?.kind === 'human' && room.accounts.get(playerId) !== user.id) {
+        room.accounts.set(playerId, user.id);
+        if (room.gameId) void store.addGameMember(room.gameId, user.id).catch(() => {});
+      }
       room.attachSocket(playerId, socket.id);
       room.tick(Date.now());
       broadcast(room);
     };
 
     const act = (ack: unknown, fn: (room: Room, playerId: string) => { ok: boolean; error?: string }) => {
+      if (draining) return reply(ack, restarting);
       const ctx = current();
       if (!ctx) return reply(ack, { ok: false, error: 'You are not in a room.' });
       const result = fn(ctx.room, ctx.playerId);
@@ -339,8 +452,14 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
       }
     };
 
-    socket.on('room:create', (p, ack) => {
-      const room = rooms.create();
+    socket.on('room:create', async (p, ack) => {
+      if (draining) return reply(ack, restarting);
+      let room = rooms.create();
+      // Codes must be unique across server processes too (old and new run side by side during a deploy).
+      for (let i = 0; i < 5 && !(await keeper.reserve(room.code)); i++) {
+        rooms.forget(room.code);
+        room = rooms.create();
+      }
       const res = room.addHuman(p?.name);
       if (!res.ok) {
         rooms.delete(room.code);
@@ -350,8 +469,10 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
       reply(ack, { ok: true, data: session(room, res.data!.id) });
     });
 
-    socket.on('room:join', (p, ack) => {
-      const room = rooms.get(p?.code);
+    socket.on('room:join', async (p, ack) => {
+      if (draining) return reply(ack, restarting);
+      const { room, busy } = await findRoom(p?.code);
+      if (busy) return reply(ack, restarting);
       if (!room) return reply(ack, { ok: false, error: 'No room with that code.' });
       const res = room.addHuman(p?.name);
       if (!res.ok) return reply(ack, { ok: false, error: res.error });
@@ -359,8 +480,10 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
       reply(ack, { ok: true, data: session(room, res.data!.id) });
     });
 
-    socket.on('room:resume', (p, ack) => {
-      const room = rooms.get(p?.code);
+    socket.on('room:resume', async (p, ack) => {
+      if (draining) return reply(ack, restarting);
+      const { room, busy } = await findRoom(p?.code);
+      if (busy) return reply(ack, restarting);
       const player = room && typeof p?.token === 'string' ? room.byToken(p.token) : undefined;
       if (!room || !player) return reply(ack, { ok: false, error: 'That session has expired.' });
       bind(room, player.id);
@@ -394,16 +517,17 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
         if (!provider) return reply(ack, { ok: false, error: 'Unknown AI provider.' });
         const user = socket.data.user;
         if (user && provider.userKeys) {
-          const plain = (await accountKeys(user.id)).get(provider.id);
+          const plain = (await accountKeys(user.id)).get(keyProviderId(provider));
           if (plain) credentials = accountCredentials(provider, plain) ?? undefined;
         }
         credentials ??= serverCredentials(provider) ?? undefined;
         if (!credentials) {
+          const keyLabel = providerById(keyProviderId(provider))?.label ?? provider.label;
           return reply(ack, {
             ok: false,
             error: user
-              ? `Save a ${provider.label} key under Account → API keys first.`
-              : `Sign in and save a ${provider.label} key to use it.`,
+              ? `Save a ${keyLabel} key under Account → API keys first.`
+              : `Sign in and save a ${keyLabel} key to use it.`,
           });
         }
       }
@@ -422,25 +546,9 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
     socket.on('game:out', (ack) =>
       act(ack, (room, pid) => room.game?.declareOut(pid, Date.now()) ?? { ok: false, error: 'No game.' }),
     );
-    socket.on('game:skip', (ack) =>
-      act(ack, (room, pid) => {
-        if (pid !== room.hostId) return { ok: false, error: 'Only the host can skip.' };
-        return room.game?.skip(Date.now()) ?? { ok: false, error: 'No game.' };
-      }),
-    );
-    socket.on('game:pause', (p, ack) =>
-      act(ack, (room, pid) => {
-        if (pid !== room.hostId) return { ok: false, error: 'Only the host can pause.' };
-        if (!room.game) return { ok: false, error: 'No game.' };
-        return p?.paused ? room.game.pause(Date.now()) : room.game.resume(Date.now());
-      }),
-    );
-    socket.on('game:end', (ack) =>
-      act(ack, (room, pid) => {
-        if (pid !== room.hostId) return { ok: false, error: 'Only the host can end the game.' };
-        return room.game?.endEarly() ?? { ok: false, error: 'No game.' };
-      }),
-    );
+    socket.on('game:skip', (ack) => act(ack, (room, pid) => room.skip(pid, Date.now())));
+    socket.on('game:pause', (p, ack) => act(ack, (room, pid) => room.pause(pid, Boolean(p?.paused), Date.now())));
+    socket.on('game:end', (ack) => act(ack, (room, pid) => room.endGame(pid)));
 
     socket.on('ai:catalog', async (ack) => {
       try {
@@ -469,17 +577,51 @@ export function createApp({ store, vault, serveClient = true, tickMs = TICK_MS }
     }
   }, tickMs);
 
-  const purger = setInterval(() => void store.purgeSessions(Date.now()).catch(() => {}), 60 * 60 * 1000);
+  const flusher = setInterval(() => {
+    for (const room of rooms.all()) void room.log?.flush();
+  }, LOG_FLUSH_MS);
+
+  const purger = setInterval(() => {
+    void store.purgeSessions(Date.now()).catch(() => {});
+    void store.purgeGames(Date.now() - GAME_RETENTION_MS).catch(() => {});
+  }, 60 * 60 * 1000);
+
+  const stopTimers = () => {
+    clearInterval(ticker);
+    clearInterval(flusher);
+    clearInterval(purger);
+  };
 
   return {
     app,
     httpServer,
     io,
     rooms,
+    keeper,
     close: async () => {
-      clearInterval(ticker);
-      clearInterval(purger);
+      stopTimers();
+      await keeper.shutdown();
       io.close();
+      await new Promise<void>((r) => httpServer.close(() => r()));
+    },
+    /**
+     * Graceful restart (SIGTERM during a deploy): freeze every game, save it for the next server
+     * process, then drop connections so browsers reconnect to the new one and carry on.
+     */
+    drain: async () => {
+      if (draining) return;
+      draining = true;
+      stopTimers();
+      for (const room of rooms.all()) {
+        room.stop();
+        if (room.status === 'playing') room.log?.add('server', 'info', 'Server restarting (deploy); game frozen and saved');
+      }
+      await Promise.all(rooms.all().map((r) => r.log?.flush()));
+      await keeper.shutdown();
+      io.emit('server:restarting');
+      await new Promise((r) => setTimeout(r, 300));
+      // Close transports rather than disconnecting sockets, so clients reconnect automatically.
+      io.engine.close();
       await new Promise<void>((r) => httpServer.close(() => r()));
     },
   };

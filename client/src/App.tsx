@@ -36,7 +36,11 @@ export function App() {
 
   return (
     <>
-      {showOffline && <div className="banner">Connection lost. Reconnecting…</div>}
+      {room.restarting ? (
+        <div className="banner">The server is updating. Your game is saved and will continue in a moment…</div>
+      ) : (
+        showOffline && <div className="banner">Connection lost. Reconnecting…</div>
+      )}
       {screen}
       <AccountModal />
       {toast && (

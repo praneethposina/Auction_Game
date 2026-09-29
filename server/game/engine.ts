@@ -1,5 +1,5 @@
 import { COMPANY_BY_ID, type CompanyDef } from '../../shared/data/companies.ts';
-import type { MarketEventDef } from '../../shared/data/events.ts';
+import { EVENT_BY_ID, type MarketEventDef } from '../../shared/data/events.ts';
 import type { SectorId } from '../../shared/data/sectors.ts';
 import {
   activeCombosForPool,
@@ -100,9 +100,54 @@ interface InternalLog extends LogEntry {
 export type GameEvent =
   | { type: 'auctionStart'; companyId: string }
   | { type: 'bid'; playerId: string; amount: number }
-  | { type: 'auctionEnd'; companyId: string; winnerId: string | null; price: number | null }
+  | {
+      type: 'auctionEnd';
+      companyId: string;
+      winnerId: string | null;
+      price: number | null;
+      bids: number;
+      startedAt: number;
+      /** AI players whose decision had not arrived when the lot closed. */
+      stillThinking: string[];
+    }
   | { type: 'roundEnd'; round: number }
   | { type: 'finished' };
+
+/**
+ * Everything needed to rebuild a game in another server process (e.g. after a deploy),
+ * as plain JSON. Company and event definitions are stored by id.
+ */
+export interface GameSnapshot {
+  v: 1;
+  settings: GameSettings;
+  players: EnginePlayer[];
+  companies: (Omit<EngineCompany, 'def'> & { id: string })[];
+  heat: Record<SectorId, number>;
+  events: string[];
+  totalRounds: number;
+  slotsPerRound: number;
+  activeComboIds: string[];
+  phase: Phase;
+  phaseEndsAt: number | null;
+  paused: boolean;
+  pausedAt: number | null;
+  round: number;
+  cursor: number;
+  auction:
+    | (Omit<AuctionState, 'out' | 'sealed' | 'aiPending'> & {
+        out: string[];
+        sealed: [string, { amount: number | null; at: number }][];
+      })
+    | null;
+  lastSale: SaleState | null;
+  aiThoughts: (AiThought & { publicReason: string })[];
+  results: FinalResults | null;
+  version: number;
+  rng: number;
+  log: InternalLog[];
+  logSeq: number;
+  intelSeq: number;
+}
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 const fail = (error: string): ActionResult => ({ ok: false, error });
@@ -136,7 +181,49 @@ export class Game {
   private logSeq = 0;
   private intelSeq = 0;
 
-  constructor(opts: { settings: GameSettings; players: PlayerInit[]; seed: number; now: number }) {
+  constructor(
+    opts:
+      | { settings: GameSettings; players: PlayerInit[]; seed: number; now: number }
+      /** Rebuild a saved game. Time between `frozenAt` and `now` doesn't count against any timer. */
+      | { snapshot: GameSnapshot; frozenAt: number; now: number },
+  ) {
+    if ('snapshot' in opts) {
+      const snap = opts.snapshot;
+      const shift = Math.max(0, opts.now - opts.frozenAt);
+      this.settings = { ...snap.settings };
+      this.rng = createRng(snap.rng);
+      this.players = snap.players;
+      this.companies = snap.companies.map(({ id, ...c }) => ({ ...c, def: COMPANY_BY_ID[id] }));
+      this.heat = snap.heat;
+      this.events = snap.events.map((id) => EVENT_BY_ID[id]);
+      this.totalRounds = snap.totalRounds;
+      this.slotsPerRound = snap.slotsPerRound;
+      this.activeComboIds = snap.activeComboIds;
+      this.phase = snap.phase;
+      this.phaseEndsAt = snap.phaseEndsAt === null ? null : snap.phaseEndsAt + shift;
+      this.paused = snap.paused;
+      this.pausedAt = snap.pausedAt === null ? null : snap.pausedAt + shift;
+      this.round = snap.round;
+      this.cursor = snap.cursor;
+      this.auction = snap.auction && {
+        ...snap.auction,
+        startedAt: snap.auction.startedAt + shift,
+        deadline: snap.auction.deadline + shift,
+        hardDeadline: snap.auction.hardDeadline + shift,
+        out: new Set(snap.auction.out),
+        sealed: new Map(snap.auction.sealed),
+        // AI players still thinking when the old server stopped are asked again.
+        aiPending: new Set(),
+      };
+      this.lastSale = snap.lastSale;
+      this.aiThoughts = snap.aiThoughts;
+      this.results = snap.results;
+      this.version = snap.version + 1;
+      this.logEntries = snap.log;
+      this.logSeq = snap.logSeq;
+      this.intelSeq = snap.intelSeq;
+      return;
+    }
     const { settings, now } = opts;
     this.settings = { ...settings };
     this.rng = createRng(opts.seed);
@@ -347,6 +434,46 @@ export class Game {
     this.touch();
   }
 
+  snapshot(): GameSnapshot {
+    const a = this.auction;
+    return structuredClone({
+      v: 1,
+      settings: this.settings,
+      players: this.players,
+      companies: this.companies.map(({ def, ...c }) => ({ ...c, id: def.id })),
+      heat: this.heat,
+      events: this.events.map((e) => e.id),
+      totalRounds: this.totalRounds,
+      slotsPerRound: this.slotsPerRound,
+      activeComboIds: this.activeComboIds,
+      phase: this.phase,
+      phaseEndsAt: this.phaseEndsAt,
+      paused: this.paused,
+      pausedAt: this.pausedAt,
+      round: this.round,
+      cursor: this.cursor,
+      auction: a && {
+        companyId: a.companyId,
+        startedAt: a.startedAt,
+        deadline: a.deadline,
+        hardDeadline: a.hardDeadline,
+        highBid: a.highBid,
+        highBidderId: a.highBidderId,
+        history: a.history,
+        out: [...a.out],
+        sealed: [...a.sealed],
+      },
+      lastSale: this.lastSale,
+      aiThoughts: this.aiThoughts,
+      results: this.results,
+      version: this.version,
+      rng: this.rng.state(),
+      log: this.logEntries,
+      logSeq: this.logSeq,
+      intelSeq: this.intelSeq,
+    } satisfies GameSnapshot);
+  }
+
   setConnected(playerId: string, connected: boolean) {
     const p = this.player(playerId);
     if (p && p.connected !== connected) {
@@ -546,7 +673,15 @@ export class Game {
     this.phase = 'sold';
     this.phaseEndsAt = now + this.soldMs();
     this.touch();
-    this.emit({ type: 'auctionEnd', companyId: company.def.id, winnerId, price });
+    this.emit({
+      type: 'auctionEnd',
+      companyId: company.def.id,
+      winnerId,
+      price,
+      bids: this.settings.auctionMode === 'open' ? a.history.length : [...a.sealed.values()].filter((b) => b.amount !== null).length,
+      startedAt: a.startedAt,
+      stillThinking: [...a.aiPending],
+    });
   }
 
   private afterSale(now: number) {

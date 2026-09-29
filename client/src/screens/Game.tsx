@@ -3,6 +3,7 @@ import { EVENT_BY_ID } from '../../../shared/data/events.ts';
 import { money } from '../../../shared/economy.ts';
 import type { RoomView } from '../../../shared/types.ts';
 import { useServerNow } from '../components/common.tsx';
+import { GameLogModal } from '../components/GameLogModal.tsx';
 import { FeedPanel, IntelPanel, MarketPanel, PlayersPanel, PortfolioPanel } from '../components/Panels.tsx';
 import { Stage } from '../components/Stage.tsx';
 import { request } from '../socket.ts';
@@ -35,6 +36,7 @@ export function Game({
   const [seenIntel, setSeenIntel] = useState(g.me?.intel.length ?? 0);
   const phaseRef = useRef(g.phase);
   const isHost = view.meId === view.hostId;
+  const [showLog, setShowLog] = useState(false);
 
   // Jump back to the auction when a new company hits the block.
   useEffect(() => {
@@ -87,6 +89,11 @@ export function Game({
           <span className="chip hide-sm">Room {view.code}</span>
           {isHost && (
             <>
+              {view.gameId && (
+                <button className="btn sm ghost" title="Game log: AI response times, errors, token use" onClick={() => setShowLog(true)}>
+                  📜<span className="hide-sm"> Log</span>
+                </button>
+              )}
               <button
                 className="btn sm"
                 title={g.paused ? 'Resume the game' : 'Pause every timer'}
@@ -146,6 +153,8 @@ export function Game({
         <IntelPanel g={g} tabClass={tabClass} />
         <FeedPanel g={g} tabClass={tabClass} />
       </div>
+
+      {showLog && view.gameId && <GameLogModal gameId={view.gameId} onClose={() => setShowLog(false)} />}
 
       <nav className="tabbar">
         {TABS.map((t) => (

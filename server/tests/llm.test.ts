@@ -184,3 +184,63 @@ describe('provider failures that will not recover', () => {
     }
   });
 });
+
+describe('LLM calls are logged for debugging', () => {
+  it('records timing, tokens, retries and the raw answer (kept secret)', async () => {
+    const { AiDirector } = await import('../ai/director.ts');
+    const { GameLog } = await import('../gamelog.ts');
+    const realFetch = globalThis.fetch;
+    const responses = [
+      new Response('slow down', { status: 429, headers: { 'retry-after': '0.05' } }),
+      Response.json({
+        choices: [{ finish_reason: 'stop', message: { content: '{"max_bid": 140, "reason": "solid pick"}' } }],
+        usage: { prompt_tokens: 410, completion_tokens: 22 },
+      }),
+    ];
+    globalThis.fetch = (async () => responses.shift()!) as typeof fetch;
+    try {
+      const written: import('../../shared/types.ts').GameLogEntry[] = [];
+      const log = new GameLog('g1', 'ROOM1', async (_id, entries) => void written.push(...entries), { quiet: true });
+      let clock = 0;
+      const game = new Game({
+        settings: { ...DEFAULT_SETTINGS, companyCount: 4, auctionMode: 'sealed' },
+        players: [
+          { id: 'h', name: 'Human', kind: 'human', isHost: true },
+          { id: 'llm', name: 'Kimi', kind: 'llm', isHost: false, ai: { persona: 'quant', provider: 'groq', model: 'kimi', modelLabel: 'Kimi K3' } },
+        ],
+        seed: 5,
+        now: 0,
+      });
+      const director = new AiDirector(game, () => clock, 1, {
+        botDelay: false,
+        log,
+        credentialsFor: () => ({ provider: 'groq', baseUrl: 'https://fake.test/v1', apiKey: 'k', source: 'account' }),
+      });
+      clock = 1e9;
+      game.tick(clock);
+      for (let i = 0; i < 100 && !written.length; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+        await log.flush();
+      }
+      const e = written.find((x) => x.kind === 'llm')!;
+      expect(e.level).toBe('info');
+      expect(e.msg).toContain('Kimi (Kimi K3) answered in');
+      expect(e.msg).toContain('410→22 tokens');
+      expect(e.data).toMatchObject({ outcome: 'ok', provider: 'groq', model: 'kimi', promptTokens: 410, outputTokens: 22, late: false });
+      const attempts = e.data!.attempts as { step: string; status: number }[];
+      expect(attempts.map((a) => [a.step, a.status])).toEqual([
+        ['ask', 429],
+        ['rate_limit_retry', 200],
+      ]);
+      expect(e.secret).toMatchObject({ maxBid: 140, reason: 'solid pick', answer: '{"max_bid": 140, "reason": "solid pick"}' });
+      expect(String(e.secret!.system)).toContain('max_bid');
+      expect(() => JSON.parse(String(e.secret!.user))).not.toThrow();
+      // Nothing private in the public part.
+      expect(JSON.stringify(e.data)).not.toContain('solid pick');
+      expect(JSON.stringify(e.data)).not.toContain('140');
+      director.dispose();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});

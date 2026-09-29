@@ -11,7 +11,7 @@ import {
   type RoomView,
   type WinCondition,
 } from '../../../shared/types.ts';
-import { PersonaLine, PlayerTag, Segmented, Toggle } from '../components/common.tsx';
+import { PersonaLine, PlayerTag, ProviderLine, Segmented, Toggle } from '../components/common.tsx';
 import { request } from '../socket.ts';
 
 const WIN_HINT: Record<WinCondition, string> = {
@@ -83,6 +83,7 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
   const [persona, setPersona] = useState<Persona>('balanced');
   const [provider, setProvider] = useState('');
   const [model, setModel] = useState('');
+  const [modelFilter, setModelFilter] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const firstLoad = useRef(true);
@@ -99,7 +100,11 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
   }, [keysVersion]);
 
   const usable = catalog?.providers.filter((p) => p.yourKey || p.serverKey) ?? [];
-  const models = useMemo(() => catalog?.models.filter((m) => m.provider === provider) ?? [], [catalog, provider]);
+  const allModels = useMemo(() => catalog?.models.filter((m) => m.provider === provider) ?? [], [catalog, provider]);
+  const models = useMemo(() => {
+    const q = modelFilter.trim().toLowerCase();
+    return q ? allModels.filter((m) => `${m.label} ${m.model}`.toLowerCase().includes(q)) : allModels;
+  }, [allModels, modelFilter]);
   useEffect(() => {
     if (models.length && !models.some((m) => m.model === model)) setModel(models[0].model);
   }, [models, model]);
@@ -146,7 +151,14 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
           <>
             <label className="field">
               Provider
-              <select className="select" value={provider} onChange={(e) => setProvider(e.target.value)}>
+              <select
+                className="select"
+                value={provider}
+                onChange={(e) => {
+                  setProvider(e.target.value);
+                  setModelFilter('');
+                }}
+              >
                 {usable.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.label} {p.yourKey ? '· your key' : '· shared server key'}
@@ -155,10 +167,18 @@ function AddAi({ onError, disabled }: { onError: (m: string) => void; disabled: 
               </select>
             </label>
             {current && <div className="hint">{current.freeTier}</div>}
+            {allModels.length > 15 && (
+              <input
+                className="input"
+                placeholder={`Search ${allModels.length} models…`}
+                value={modelFilter}
+                onChange={(e) => setModelFilter(e.target.value)}
+              />
+            )}
             <label className="field">
               Model
               <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
-                {models.length === 0 && <option value="">No models found for this key</option>}
+                {models.length === 0 && <option value="">{modelFilter ? 'No models match' : 'No models found for this key'}</option>}
                 {models.map((m) => (
                   <option key={m.model} value={m.model}>
                     {m.recommended ? '★ ' : ''}
@@ -298,6 +318,7 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
                     <div style={{ fontWeight: 600 }}>
                       {p.name} {p.id === view.meId && <span className="faint small">(you)</span>}
                     </div>
+                    <ProviderLine kind={p.kind} ai={p.ai} />
                     <PersonaLine kind={p.kind} ai={p.ai} />
                     {p.ai?.provider && (
                       <div className="tiny muted">

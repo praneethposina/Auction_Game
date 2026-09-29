@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import type { Tier } from '../../../shared/data/companies.ts';
 import { SECTORS, type SectorId } from '../../../shared/data/sectors.ts';
 import { TIER_LABEL } from '../../../shared/economy.ts';
-import { PERSONAS, type PlayerKind, type PublicAiSpec } from '../../../shared/types.ts';
+import { PERSONAS, PROVIDER_LABELS, type PlayerKind, type PublicAiSpec } from '../../../shared/types.ts';
 
 export function SectorChip({ sector, short = false }: { sector: SectorId; short?: boolean }) {
   const s = SECTORS[sector];
@@ -130,6 +130,16 @@ export function PersonaLine({ kind, ai, blurb = true }: { kind: PlayerKind; ai?:
     <div className="persona-line" title={p.blurb}>
       🎭 <strong>{p.label}</strong>
       {blurb && <span className="muted"> · {p.blurb}</span>}
+    </div>
+  );
+}
+
+/** Which provider serves an LLM player, in small print under its name. */
+export function ProviderLine({ kind, ai }: { kind: PlayerKind; ai?: PublicAiSpec }) {
+  if (kind !== 'llm' || !ai?.provider) return null;
+  return (
+    <div className="provider-line" title={ai.model}>
+      via {PROVIDER_LABELS[ai.provider] ?? ai.provider}
     </div>
   );
 }

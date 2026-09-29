@@ -130,6 +130,18 @@ export interface AiSpec {
   keyOwner?: string;
 }
 
+/** Short provider names for display (the server's provider list has the details). */
+export const PROVIDER_LABELS: Record<string, string> = {
+  groq: 'Groq',
+  openrouter: 'OpenRouter',
+  'openrouter-paid': 'OpenRouter (paid)',
+  cerebras: 'Cerebras',
+  gemini: 'Google Gemini',
+  huggingface: 'Hugging Face',
+  ollama: 'Ollama',
+  custom: 'Custom endpoint',
+};
+
 /** AI details as sent to a client. `persona` is withheld when the host hides personalities. */
 export type PublicAiSpec = Omit<AiSpec, 'persona'> & { persona?: Persona };
 
@@ -326,6 +338,42 @@ export interface RoomView {
   players: LobbyPlayer[];
   settings: GameSettings;
   game: GameView | null;
+  /** Id of the current (or last) game, for its log. */
+  gameId: string | null;
+}
+
+// ── Game logs ───────────────────────────────────────────────────
+
+export type GameLogKind = 'game' | 'round' | 'lot' | 'llm' | 'bot' | 'player' | 'server';
+export type GameLogLevel = 'info' | 'warn' | 'error';
+
+export interface GameLogEntry {
+  seq: number;
+  at: number;
+  kind: GameLogKind;
+  level: GameLogLevel;
+  msg: string;
+  playerId?: string;
+  data?: Record<string, unknown>;
+  /** Prompts, raw answers, AI max bids and full reasoning. Only served once the game is over. */
+  secret?: Record<string, unknown>;
+}
+
+export interface GameInfo {
+  id: string;
+  roomCode: string;
+  startedAt: number;
+  endedAt: number | null;
+  status: 'playing' | 'finished' | 'ended';
+  players: { id: string; name: string; kind: PlayerKind; provider?: string; model?: string; modelLabel?: string; persona?: Persona }[];
+  settings: GameSettings;
+}
+
+export interface GameLogResponse {
+  game: GameInfo;
+  entries: GameLogEntry[];
+  /** False while the game is running: `secret` fields are left out. */
+  revealed: boolean;
 }
 
 // ── AI model catalog ────────────────────────────────────────────
@@ -380,6 +428,8 @@ export interface Ack<T = unknown> {
   ok: boolean;
   error?: string;
   data?: T;
+  /** The request may succeed if sent again shortly (e.g. the server is restarting). */
+  retry?: boolean;
 }
 
 export interface SessionInfo {
@@ -410,4 +460,6 @@ export interface ClientToServer {
 export interface ServerToClient {
   'room:state': (view: RoomView) => void;
   'room:kicked': (p: { reason: string }) => void;
+  /** The server is about to restart (e.g. a deploy); the game is saved and resumes on reconnect. */
+  'server:restarting': () => void;
 }
