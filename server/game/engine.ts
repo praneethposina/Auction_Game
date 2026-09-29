@@ -33,9 +33,6 @@ import { createRng, type Rng } from './rng.ts';
 import { drawEvents, rollSectorHeat, rollTurnover, selectPool } from './setup.ts';
 
 export const TIMING = {
-  firstIntroMs: 7000,
-  introMs: 5500,
-  noEventIntroMs: 2500,
   soldMs: 3200,
   summaryMs: 8000,
   /** Once everyone but the leader is out, close this quickly. */
@@ -174,7 +171,7 @@ export class Game {
       for (let i = 0; i < settings.intelPerPlayer; i++) this.giveIntel(p, 'start');
     }
 
-    this.phaseEndsAt = now + (settings.marketEvents ? TIMING.firstIntroMs : TIMING.noEventIntroMs);
+    this.phaseEndsAt = now + this.introMs();
     this.announceRound();
   }
 
@@ -231,6 +228,11 @@ export class Game {
 
   private bidMs(): number {
     return this.settings.bidSeconds * 1000;
+  }
+
+  /** Round intro (market news) duration, set by the host. */
+  introMs(): number {
+    return this.settings.introSeconds * 1000;
   }
 
   private resetMs(): number {
@@ -543,7 +545,7 @@ export class Game {
     }
     this.round++;
     this.phase = 'intro';
-    this.phaseEndsAt = now + (this.settings.marketEvents ? TIMING.introMs : TIMING.noEventIntroMs);
+    this.phaseEndsAt = now + this.introMs();
     this.announceRound();
   }
 

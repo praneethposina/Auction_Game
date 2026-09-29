@@ -20,6 +20,7 @@ The host picks:
 | Intel tips per player | 2 | 0–5 |
 | Catch-up intel | On | Last place gets an extra tip each round |
 | Bid timer | 10 s | |
+| Intro before each round | 6 s | How long the round intro with the market news stays up before bidding (2–60 s) |
 | AI reasoning | Live | Shown after each sale, or only at the end |
 
 **Rounds.** One company per player per round. 5 players and 20 companies means 4 rounds.

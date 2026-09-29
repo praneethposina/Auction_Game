@@ -14,6 +14,7 @@ import { DEFAULT_SETTINGS, type GameSettings } from '../../shared/types.ts';
 import { Game, TIMING, type PlayerInit } from '../game/engine.ts';
 import { createRng } from '../game/rng.ts';
 import { rollSectorHeat, rollTurnover, selectPool } from '../game/setup.ts';
+import { sanitizeSettings } from '../rooms.ts';
 
 const PLAYERS: PlayerInit[] = [
   { id: 'a', name: 'Alice', kind: 'human', isHost: true },
@@ -400,5 +401,30 @@ describe('hidden information', () => {
         }
       }
     }
+  });
+});
+
+describe('round intro timing', () => {
+  it('shows the intro for the host-chosen number of seconds every round', () => {
+    const game = newGame({ companyCount: 6, introSeconds: 12 });
+    expect(game.phase).toBe('intro');
+    expect(game.phaseEndsAt).toBe(12000);
+    game.tick(11999);
+    expect(game.phase).toBe('intro');
+    let now = advance(game, 0);
+    expect(game.phase).toBe('auction');
+    while (game.phase !== 'intro') {
+      if (game.phase === 'auction') for (const p of PLAYERS) game.declareOut(p.id, now);
+      now = advance(game, now);
+    }
+    expect(game.round).toBe(2);
+    expect(game.phaseEndsAt! - now).toBe(12000);
+  });
+
+  it('clamps the setting to 2–60 seconds', () => {
+    expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: 0 }).introSeconds).toBe(2);
+    expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: 999 }).introSeconds).toBe(60);
+    expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: 15 }).introSeconds).toBe(15);
+    expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: Number.NaN }).introSeconds).toBe(DEFAULT_SETTINGS.introSeconds);
   });
 });

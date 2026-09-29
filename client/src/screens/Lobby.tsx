@@ -361,6 +361,19 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
               onCommit={(v) => set({ bidSeconds: v })}
             />
             <NumberField
+              label="Intro before each round"
+              suffix="(seconds)"
+              value={s.introSeconds}
+              min={LIMITS.introSeconds[0]}
+              max={LIMITS.introSeconds[1]}
+              disabled={!isHost}
+              onCommit={(v) => set({ introSeconds: v })}
+            />
+            <div className="hint" style={{ alignSelf: 'end', paddingBottom: 8 }}>
+              How long the round intro with {s.marketEvents ? 'the market news headline' : 'the round number'} stays on
+              screen before bidding opens. The host can always skip it.
+            </div>
+            <NumberField
               label="Turnover range: min"
               suffix="($M / round)"
               value={s.turnoverMin}
