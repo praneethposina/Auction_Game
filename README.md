@@ -19,6 +19,8 @@ friends or against AI players powered by free, open-weight LLMs.
 - **Quick accounts.** Username and password only, no email. Save your free API keys once
   (encrypted on the server) and add LLM players to any game you host, with no server setup.
 
+**Play it live:** https://game-production-e52d.up.railway.app
+
 Full rules and numbers: [GAME_DESIGN.md](GAME_DESIGN.md).
 
 ## Quick start
@@ -70,24 +72,28 @@ server can use those, so leave them empty on a public deployment.
 
 ## Deploy on Railway
 
-The repo includes `railway.json`, which sets the build, start command and health check.
+The live game runs on Railway, defined in code in `.railway/railway.ts`:
+- a `game` service built from this repo's `main` branch (`npm run build`, then `npm start`),
+  health-checked at `/api/health`, with 1 replica
+- a Postgres database with its volume
 
-1. On [railway.com](https://railway.com), click **New Project → Deploy from GitHub repo** and pick
-   this repository. Allow Railway's GitHub app to access it if asked.
-2. If the code isn't on `main` yet, open the service's **Settings → Source** and set the branch
-   to the one that has it.
-3. In the project, click **+ New → Database → Add PostgreSQL**.
-4. In the game service's **Variables**, add:
-   - `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`
-   - `APP_SECRET` = a long random string. Generate one with:
-     `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`
+**Every push to `main` deploys automatically.** To change the infrastructure, edit
+`.railway/railway.ts`, preview with `railway config plan`, then run `railway config apply`.
 
-     Never change it later: changing it makes saved keys unreadable.
-5. Open **Settings → Networking → Generate Domain**. Your game is live at that URL.
+The service has two variables, which hold references and secrets and are not in the file:
+- `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`
+- `APP_SECRET`: a long random string that encrypts saved API keys. Never change it: changing it
+  makes saved keys unreadable.
 
-Railway sets `PORT` itself. Rooms live in memory on a single instance, so keep replicas at 1.
-Without `DATABASE_URL` the server falls back to SQLite, which needs a Railway volume mounted at
-`/data` plus `DATA_DIR=/data`, or accounts are lost on each deploy.
+To set up your own copy from scratch:
+1. On [railway.com](https://railway.com), click **New Project → Deploy from GitHub repo** and
+   pick this repository.
+2. Click **+ New → Database → Add PostgreSQL**.
+3. Add the two variables above to the game service.
+4. Open **Settings → Networking → Generate Domain**.
+
+Rooms live in memory, so keep a single replica. A redeploy ends games in progress; accounts
+and keys are kept.
 
 ### Other hosts
 
