@@ -70,6 +70,8 @@ export function sanitizeSettings(current: GameSettings, patch: Partial<GameSetti
   if (patch.bidSeconds !== undefined) next.bidSeconds = clamp(patch.bidSeconds, LIMITS.bidSeconds, current.bidSeconds);
   if (patch.introSeconds !== undefined)
     next.introSeconds = clamp(patch.introSeconds, LIMITS.introSeconds, current.introSeconds);
+  if (patch.summarySeconds !== undefined)
+    next.summarySeconds = clamp(patch.summarySeconds, LIMITS.summarySeconds, current.summarySeconds);
   if (patch.auctionMode === 'open' || patch.auctionMode === 'sealed') next.auctionMode = patch.auctionMode;
   if (patch.winCondition && ['netWorth', 'roi', 'purse', 'portfolio'].includes(patch.winCondition))
     next.winCondition = patch.winCondition;

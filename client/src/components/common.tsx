@@ -47,9 +47,10 @@ export function Countdown({ endsAt, now, total }: { endsAt: number | null; now: 
   const left = Math.max(0, endsAt - now);
   const secs = Math.ceil(left / 1000);
   const urgent = left <= 3000;
+  const label = secs >= 60 ? `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}` : `${secs}s`;
   return (
     <div className="stack" style={{ gap: 6 }}>
-      <div className={`countdown ${urgent ? 'urgent' : ''}`}>{secs}s</div>
+      <div className={`countdown ${urgent ? 'urgent' : ''}`}>{label}</div>
       {total ? (
         <div className={`timer ${urgent ? 'urgent' : ''}`}>
           <div style={{ width: `${Math.min(100, (left / total) * 100)}%` }} />

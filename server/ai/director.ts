@@ -62,7 +62,8 @@ export class AiDirector {
   private startAuction(companyId: string) {
     const seq = ++this.seq;
     const now = this.now();
-    const timeoutMs = this.game.settings.bidSeconds * 1000 + TIMING.aiGraceMs - 1500;
+    // Long bid timers shouldn't mean waiting minutes on a stuck LLM request.
+    const timeoutMs = Math.min(45000, this.game.settings.bidSeconds * 1000 + TIMING.aiGraceMs - 1500);
     for (const p of this.aiPlayers()) {
       this.game.setAiPending(p.id, true, now);
       const persona = p.ai?.persona ?? 'balanced';

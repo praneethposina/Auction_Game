@@ -39,10 +39,18 @@ function NumberField({
   suffix?: string;
 }) {
   const [draft, setDraft] = useState(String(value));
+  const [note, setNote] = useState<string | null>(null);
   useEffect(() => setDraft(String(value)), [value]);
+  useEffect(() => {
+    if (!note) return;
+    const id = setTimeout(() => setNote(null), 4000);
+    return () => clearTimeout(id);
+  }, [note]);
   const commit = () => {
-    const n = Math.round(Number(draft));
-    if (!Number.isFinite(n) || draft.trim() === '') return setDraft(String(value));
+    const raw = Math.round(Number(draft));
+    if (!Number.isFinite(raw) || draft.trim() === '') return setDraft(String(value));
+    const n = Math.min(max, Math.max(min, raw));
+    setNote(n !== raw ? `Allowed range is ${min.toLocaleString()}–${max.toLocaleString()}, so it was set to ${n.toLocaleString()}.` : null);
     if (n !== value) onCommit(n);
     else setDraft(String(value));
   };
@@ -63,6 +71,7 @@ function NumberField({
         onBlur={commit}
         onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
       />
+      {note && <span className="hint" style={{ color: 'var(--warn)' }}>{note}</span>}
     </label>
   );
 }
@@ -369,9 +378,20 @@ export function Lobby({ view, onLeave, onError }: { view: RoomView; onLeave: () 
               disabled={!isHost}
               onCommit={(v) => set({ introSeconds: v })}
             />
-            <div className="hint" style={{ alignSelf: 'end', paddingBottom: 8 }}>
-              How long the round intro with {s.marketEvents ? 'the market news headline' : 'the round number'} stays on
-              screen before bidding opens. The host can always skip it.
+            <NumberField
+              label="Round summary"
+              suffix="(seconds)"
+              value={s.summarySeconds}
+              min={LIMITS.summarySeconds[0]}
+              max={LIMITS.summarySeconds[1]}
+              disabled={!isHost}
+              onCommit={(v) => set({ summarySeconds: v })}
+            />
+            <div className="full hint">
+              <strong>Bid timer:</strong> time to bid on each company (open bidding resets it after every bid).{' '}
+              <strong>Intro:</strong> how long the round number{s.marketEvents ? ' and market news' : ''} show before
+              bidding opens. <strong>Round summary:</strong> how long the payday screen shows after each round. Up to 10
+              minutes each; the host can always skip the intro and summary.
             </div>
             <NumberField
               label="Turnover range: min"

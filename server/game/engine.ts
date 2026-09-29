@@ -34,7 +34,6 @@ import { drawEvents, rollSectorHeat, rollTurnover, selectPool } from './setup.ts
 
 export const TIMING = {
   soldMs: 3200,
-  summaryMs: 8000,
   /** Once everyone but the leader is out, close this quickly. */
   earlyCloseMs: 1200,
   /** How long an auction may be held open past its deadline for AI players still deciding. */
@@ -233,6 +232,11 @@ export class Game {
   /** Round intro (market news) duration, set by the host. */
   introMs(): number {
     return this.settings.introSeconds * 1000;
+  }
+
+  /** End-of-round payout summary duration, set by the host. */
+  summaryMs(): number {
+    return this.settings.summarySeconds * 1000;
   }
 
   private resetMs(): number {
@@ -533,7 +537,7 @@ export class Game {
     }
 
     this.phase = 'summary';
-    this.phaseEndsAt = now + TIMING.summaryMs;
+    this.phaseEndsAt = now + this.summaryMs();
     this.touch();
     this.emit({ type: 'roundEnd', round: this.round });
   }

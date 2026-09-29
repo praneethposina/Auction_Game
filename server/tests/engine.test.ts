@@ -421,10 +421,45 @@ describe('round intro timing', () => {
     expect(game.phaseEndsAt! - now).toBe(12000);
   });
 
-  it('clamps the setting to 2–60 seconds', () => {
+  it('clamps the setting to 2–600 seconds', () => {
     expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: 0 }).introSeconds).toBe(2);
-    expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: 999 }).introSeconds).toBe(60);
+    expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: 999 }).introSeconds).toBe(600);
     expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: 15 }).introSeconds).toBe(15);
     expect(sanitizeSettings(DEFAULT_SETTINGS, { introSeconds: Number.NaN }).introSeconds).toBe(DEFAULT_SETTINGS.introSeconds);
+  });
+});
+
+describe('long timers', () => {
+  it('applies bid timers above a minute', () => {
+    const game = newGame({ bidSeconds: 300 });
+    const start = advance(game, 0);
+    expect(game.phase).toBe('auction');
+    expect(game.auction!.deadline - start).toBe(300000);
+    game.tick(start + 299000);
+    expect(game.phase).toBe('auction');
+    game.tick(start + 300001);
+    expect(game.phase).toBe('sold');
+  });
+
+  it('shows the round summary for the host-chosen time', () => {
+    const game = newGame({ companyCount: 6, summarySeconds: 90 });
+    let now = advance(game, 0);
+    while (game.phase !== 'summary') {
+      if (game.phase === 'auction') for (const p of PLAYERS) game.declareOut(p.id, now);
+      now = advance(game, now);
+    }
+    expect(game.phaseEndsAt! - now).toBe(90000);
+    game.tick(now + 89000);
+    expect(game.phase).toBe('summary');
+    game.tick(now + 90001);
+    expect(game.phase).toBe('intro');
+  });
+
+  it('allows up to 10 minutes per timer', () => {
+    const s = sanitizeSettings(DEFAULT_SETTINGS, { bidSeconds: 600, introSeconds: 600, summarySeconds: 600 });
+    expect([s.bidSeconds, s.introSeconds, s.summarySeconds]).toEqual([600, 600, 600]);
+    const over = sanitizeSettings(DEFAULT_SETTINGS, { bidSeconds: 5000, summarySeconds: 5000 });
+    expect([over.bidSeconds, over.summarySeconds]).toEqual([600, 600]);
+    expect(sanitizeSettings(DEFAULT_SETTINGS, { summarySeconds: 1 }).summarySeconds).toBe(2);
   });
 });

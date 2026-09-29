@@ -25,6 +25,8 @@ export interface GameSettings {
   bidSeconds: number;
   /** How long the round intro (with market news) shows before bidding starts. */
   introSeconds: number;
+  /** How long the end-of-round payout summary shows before the next round. */
+  summarySeconds: number;
   /** When AI players' reasoning becomes visible to everyone. */
   aiReasoning: 'live' | 'end';
 }
@@ -43,6 +45,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
   catchUpIntel: true,
   bidSeconds: 10,
   introSeconds: 6,
+  summarySeconds: 8,
   aiReasoning: 'live',
 };
 
@@ -53,8 +56,9 @@ export const LIMITS = {
   turnoverMin: [0, 100000],
   turnoverMax: [1, 100000],
   intelPerPlayer: [0, 5],
-  bidSeconds: [5, 60],
-  introSeconds: [2, 60],
+  bidSeconds: [5, 600],
+  introSeconds: [2, 600],
+  summarySeconds: [2, 600],
 } as const;
 
 export const WIN_CONDITION_LABEL: Record<WinCondition, string> = {
